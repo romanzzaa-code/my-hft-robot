@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env
+*.so
+*.dylib
+*.dll
+
+# C++ / сборка
+build/
+CMakeFiles/
+CMakeCache.txt
+*.o
+*.a
+*.lib
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs and databases
+*.log
+*.db
+timescaledb_data/
+
+# Secrets (НИКОГДА не коммитить!)
+secrets.py
+config_local.yaml
