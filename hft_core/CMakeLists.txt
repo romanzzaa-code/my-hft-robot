@@ -71,8 +71,6 @@ endif()
 target_compile_definitions(uSockets PRIVATE LIBUS_NO_SSL)
 
 # 2.4 uWebSockets (HEADER ONLY)
-# Мы просто скачиваем файлы, но НЕ делаем add_subdirectory, 
-# чтобы не создавать лишних целей, которые путают CMake.
 FetchContent_Declare(
   uwebsockets
   GIT_REPOSITORY https://github.com/uNetworking/uWebSockets.git
@@ -102,26 +100,29 @@ endif()
 find_package(Python 3.10 COMPONENTS Interpreter Development REQUIRED)
 
 # --- 5. Сборка нашего модуля ---
-add_library(hft_core SHARED src/main.cpp)
+# ВАЖНО: Добавляем сюда новые файлы exchange_streamer.cpp
+add_library(hft_core SHARED 
+    src/main.cpp
+    src/exchange_streamer.cpp 
+)
 
 # --- 6. Линковка ---
-# ВНИМАНИЕ: Здесь убрали uWebSockets, так как это не библиотека, а просто хидеры
 target_link_libraries(hft_core PRIVATE 
     pybind11::module 
     pybind11::lto 
     simdjson::simdjson
     uSockets 
 )
+target_compile_definitions(hft_core PRIVATE UWS_NO_ZLIB)
 
 if(WIN32)
-    # Системные библиотеки Windows для сети
     target_link_libraries(hft_core PRIVATE uv_a ws2_32 iphlpapi userenv psapi)
 endif()
 
 # --- 7. Пути к заголовкам ---
 target_include_directories(hft_core PRIVATE 
     include
-    ${uwebsockets_SOURCE_DIR}/src  # <-- Вот здесь мы подключаем uWebSockets
+    ${uwebsockets_SOURCE_DIR}/src
     ${usockets_SOURCE_DIR}/src
 )
 
