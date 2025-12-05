@@ -1,35 +1,55 @@
-# Python
+# --- Python Core ---
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
 venv/
 .env
+.pytest_cache/
+*.egg-info/
+
+# --- C++ & CMake Build Artifacts ---
+# Папки сборки (куда будем компилировать)
+build/
+cmake-build-*/
+out/
+bin/
+
+# Файлы, генерируемые CMake (если случайно запустишь cmake в корне)
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Скомпилированные библиотеки и объекты
+*.o
+*.obj
 *.so
 *.dylib
 *.dll
-
-# C++ / сборка
-build/
-CMakeFiles/
-CMakeCache.txt
-*.o
 *.a
 *.lib
+*.exe
 
-# Docker
-.dockerignore
+# --- HFT Data & Logs ---
+*.log
+*.db
+*.sqlite
+timescaledb_data/
+# Игнорируем тяжелые дампы данных для бэктестов (.npz по твоему ТЗ)
+*.npz
+data/
 
-# IDE
+# --- IDE & OS Junk ---
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
 *.swp
 *.swo
 
-# Logs and databases
-*.log
-*.db
-timescaledb_data/
-
-# Secrets (НИКОГДА не коммитить!)
+# --- Secrets (Safety First!) ---
 secrets.py
 config_local.yaml
+*.key
+*.pem
