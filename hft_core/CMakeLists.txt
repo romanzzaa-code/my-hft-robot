@@ -30,6 +30,8 @@ find_package(Python 3.10 COMPONENTS Interpreter Development REQUIRED)
 add_library(hft_core SHARED 
     src/main.cpp
     src/exchange_streamer.cpp 
+    src/parsers/binance_parser.cpp
+    src/parsers/bybit_parser.cpp
 )
 
 # --- 5. Линковка ---
