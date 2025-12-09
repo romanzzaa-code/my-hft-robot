@@ -12,28 +12,34 @@ DB_CONFIG = {
 }
 
 # SQL-схема
+# hft_strategy/db_migration.py
+
+# ... (импорты и конфиг те же)
+
 INIT_SQL = """
--- 1. Создаем обычную таблицу
+-- 1. Создаем таблицу с учетом HFT специфики
 CREATE TABLE IF NOT EXISTS market_ticks (
-    time            TIMESTAMPTZ NOT NULL,
+    time            TIMESTAMPTZ NOT NULL, -- Local arrival time (Partition Key)
+    exch_time       TIMESTAMPTZ NOT NULL, -- Exchange matching engine time
     symbol          TEXT NOT NULL,
     price           DOUBLE PRECISION NULL,
     volume          DOUBLE PRECISION NULL,
     is_buyer_maker  BOOLEAN NULL
 );
 
--- 2. Превращаем её в гипертаблицу TimescaleDB
--- chunk_time_interval = 1 day означает, что данные разбиваются на файлы по 1 дню.
+-- 2. Гипертаблица
 SELECT create_hypertable('market_ticks', 'time', if_not_exists => TRUE, chunk_time_interval => INTERVAL '1 day');
 
--- 3. Создаем индексы для скорости
+-- 3. Индексы
 CREATE INDEX IF NOT EXISTS idx_market_ticks_symbol_time ON market_ticks (symbol, time DESC);
+-- Полезный индекс для анализа задержек
+CREATE INDEX IF NOT EXISTS idx_market_ticks_exch_time ON market_ticks (exch_time DESC);
 
--- 4. Настраиваем сжатие (экономит 90% места на диске!)
--- Включаем сжатие для данных старше 3 дней
+-- 4. Сжатие
 ALTER TABLE market_ticks SET (
     timescaledb.compress,
-    timescaledb.compress_segmentby = 'symbol'
+    timescaledb.compress_segmentby = 'symbol',
+    timescaledb.compress_orderby = 'time DESC' -- Сортировка внутри чанка
 );
 SELECT add_compression_policy('market_ticks', INTERVAL '3 days', if_not_exists => TRUE);
 """

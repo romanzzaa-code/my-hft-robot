@@ -9,7 +9,10 @@ logger = logging.getLogger("DB_WRITER")
 
 # --- Слой Инфраструктуры (Repository) ---
 class TimescaleRepository:
-    """Отвечает ТОЛЬКО за отправку данных в Postgres/TimescaleDB."""
+    """
+    Отвечает ТОЛЬКО за отправку данных в Postgres/TimescaleDB.
+    Принцип Single Responsibility (SRP).
+    """
     def __init__(self, db_config):
         self.db_config = db_config
         self.pool = None
@@ -23,16 +26,16 @@ class TimescaleRepository:
             raise
 
     async def save_batch(self, records: List[Tuple]):
-        """Чистая операция записи пачки."""
         if not self.pool:
             return
         
         try:
             async with self.pool.acquire() as conn:
+                # FIX: Добавлен столбец 'exch_time' в список
                 await conn.copy_records_to_table(
                     'market_ticks',
                     records=records,
-                    columns=['time', 'symbol', 'price', 'volume', 'is_buyer_maker']
+                    columns=['time', 'exch_time', 'symbol', 'price', 'volume', 'is_buyer_maker']
                 )
             logger.debug(f"💾 Repository saved {len(records)} ticks")
         except Exception as e:
@@ -45,9 +48,8 @@ class TimescaleRepository:
 
 # --- Слой Приложения (Service/Buffer) ---
 class BufferedTickWriter:
-    """Отвечает ТОЛЬКО за буферизацию и стратегию сброса."""
     def __init__(self, repository: TimescaleRepository, batch_size=1000, flush_interval=0.5):
-        self.repo = repository # Внедренная зависимость
+        self.repo = repository
         self.batch_size = batch_size
         self.flush_interval = flush_interval
         
@@ -63,8 +65,22 @@ class BufferedTickWriter:
         if not self._running:
             return
 
-        dt = datetime.fromtimestamp(tick.timestamp / 1000.0, tz=timezone.utc)
-        record = (dt, tick.symbol, tick.price, tick.volume, None)
+        # Архитектурное улучшение: Разделяем время поступления и время биржи
+        # 'time' (PK) -> Local Time (сейчас) - важно для строгого порядка в TimescaleDB
+        local_dt = datetime.now(timezone.utc)
+        
+        # 'exch_time' -> Exchange Time (из тика)
+        exch_dt = datetime.fromtimestamp(tick.timestamp / 1000.0, tz=timezone.utc)
+
+        # Формируем кортеж согласно порядку columns в save_batch
+        record = (
+            local_dt,      # time
+            exch_dt,       # exch_time (FIX: теперь не null)
+            tick.symbol,   # symbol
+            tick.price,    # price
+            tick.volume,   # volume
+            None           # is_buyer_maker (пока null, если парсер не отдает)
+        )
         
         self.buffer.append(record)
 
@@ -75,11 +91,9 @@ class BufferedTickWriter:
         if not self.buffer:
             return
 
-        # Атомарно забираем данные и очищаем буфер
         records_to_save = self.buffer[:]
         self.buffer.clear()
         
-        # Делегируем запись репозиторию
         await self.repo.save_batch(records_to_save)
 
     async def _periodic_flush(self):
@@ -91,4 +105,4 @@ class BufferedTickWriter:
         self._running = False
         if self._flush_task:
             self._flush_task.cancel()
-        await self._flush() # Финальный сброс
+        await self._flush()
