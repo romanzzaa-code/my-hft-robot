@@ -175,3 +175,69 @@ hft_strategy/
 ├── db_writer.py                     (Handles JSON serialization)
 ├── db_migration.py                  (Creates JSONB tables)
 └── export_data.py                   (SQL -> NPZ converter)
+
+# 🔥 HFT Robot Project Context (Restore Point)
+**Date:** 09.12.2025 (Updated)
+**Role:** Lead Quantitative Developer (Code Critic Persona)
+**Status:** Phase 2.3 Completed (Architecture Hardened & Optimized)
+
+## 🎯 Цель проекта
+Создание самообучающегося HFT-робота для скальпинга "от плотностей" (Wall Bounce) на Bybit (Master Trader Copytrading).
+**Текущий фокус:** Переход к Фазе 3 (Логика стратегии и Бэктестинг).
+
+---
+
+## 🏗 Текущая Архитектура (Refactored & Clean)
+Мы устранили "детские болезни" прототипа и перешли к промышленным стандартам:
+
+1.  **Configuration (SSOT):**
+    -   Внедрен `config.py` с датаклассами `DatabaseConfig` и `TradingConfig`.
+    -   Убран хардкод паролей и URL из кода классов.
+    -   `main.py` выступает как **Composition Root**, собирая граф зависимостей.
+
+2.  **Performance Layer:**
+    -   **Serialization:** Создан `serializers.py` (SRP).
+    -   **Speed:** Стандартный `json` заменен на `orjson` (Rust-based, в 10-20 раз быстрее).
+    -   **Non-Blocking:** Убраны блокирующие вызовы `json.dumps` из Event Loop'а.
+
+3.  **Data Safety:**
+    -   **Streaming:** Скрипт `export_data.py` переписан на **Server-Side Cursors**. Теперь экспорт гигабайтов данных не вызывает `MemoryError`.
+
+---
+
+## ✅ Что сделано (Completed Tasks)
+
+### 1. Архитектура и Безопасность
+* [x] **Config Management:** Создан `hft_strategy/config.py`. Все креды и настройки теперь в одном месте.
+* [x] **Dependency Injection:** `MarketBridge` и `TimescaleRepository` теперь получают настройки через конструктор. Сделана легкая смена Mainnet <-> Testnet.
+* [x] **Single Responsibility:** Логика сериализации вынесена в `serializers.py`.
+
+### 2. Оптимизация (Performance)
+* [cite_start][x] **Orjson Integration:** Внедрен `orjson` в `db_writer.py` и `export_data.py`[cite: 36].
+* [cite_start][x] **Memory Safety:** `export_data.py` переписан на потоковую обработку (cursor iteration) вместо загрузки всего в RAM[cite: 36].
+
+### 3. Базовый пайплайн (Сохранено с прошлых фаз)
+* [cite_start][x] **C++ Core:** `ExchangeStreamer` + `BybitParser` (simdjson) работают стабильно[cite: 24, 46].
+* [cite_start][x] **Data Storage:** TimescaleDB успешно пишет тики и снимки стаканов (JSONB)[cite: 36].
+
+---
+
+## 📂 Структура файлов (Актуальная)
+```text
+hft_core/
+├── include/
+│   ├── entities/market_depth.hpp    (Struct OrderBookSnapshot)
+│   ├── parsers/bybit_parser.hpp     (Updated parse signature)
+│   └── exchange_streamer.hpp        (Dual callback definitions)
+├── src/
+│   ├── parsers/bybit_parser.cpp     (Snapshot + Delta logic)
+│   ├── exchange_streamer.cpp        (Routing Trade vs Depth)
+│   └── main.cpp                     (Pybind11 exports)
+hft_strategy/
+├── config.py                        (🔥 NEW: Config Dataclasses)
+├── serializers.py                   (🔥 NEW: Orjson Logic)
+├── market_bridge.py                 (Updated: DI injection)
+├── db_writer.py                     (Updated: Uses serializers & orjson)
+├── export_data.py                   (Updated: Streaming cursors)
+├── main.py                          (Updated: Composition Root)
+└── db_migration.py                  (SQL schema init)

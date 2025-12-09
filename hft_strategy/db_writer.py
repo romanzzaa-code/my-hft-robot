@@ -2,22 +2,23 @@
 import asyncio
 import asyncpg
 import logging
-import json
+# import json  <-- Убрали медленный json
 from datetime import datetime, timezone
 from typing import List, Tuple, Any
 
+# Импортируем наш быстрый сериализатор (SRP)
+from serializers import MarketDataSerializer
+
 logger = logging.getLogger("DB_WRITER")
 
-# --- Слой Инфраструктуры (Repository) ---
 class TimescaleRepository:
-    def __init__(self, db_config):
+    def __init__(self, db_config: dict):
         self.db_config = db_config
         self.pool = None
 
     async def connect(self):
         try:
-            # [FIX] Убрали init=self._init_connection. 
-            # Для надежности с copy_records_to_table будем подавать строки.
+            # db_config приходит уже как словарь из main.py
             self.pool = await asyncpg.create_pool(**self.db_config)
             logger.info("✅ Repository connected to DB")
         except Exception as e:
@@ -43,7 +44,7 @@ class TimescaleRepository:
             return
         try:
             async with self.pool.acquire() as conn:
-                # asyncpg запишет строки (json) в колонки jsonb без проблем
+                # asyncpg корректно пишет JSON-строки в JSONB колонки
                 await conn.copy_records_to_table(
                     'market_depth_snapshots',
                     records=records,
@@ -58,7 +59,7 @@ class TimescaleRepository:
             await self.pool.close()
             logger.info("DB Connection closed")
 
-# --- Слой Приложения (Service/Buffer) ---
+
 class BufferedTickWriter:
     def __init__(self, repository: TimescaleRepository, batch_size=1000, flush_interval=0.5):
         self.repo = repository
@@ -80,12 +81,13 @@ class BufferedTickWriter:
             return
 
         event_type = getattr(event, 'type', 'unknown')
+        
+        # Оптимизация: берем время один раз
+        local_dt = datetime.now(timezone.utc)
+        exch_dt = datetime.fromtimestamp(event.timestamp / 1000.0, tz=timezone.utc)
 
         # 1. ТИКИ
         if event_type == 'trade':
-            local_dt = datetime.now(timezone.utc)
-            exch_dt = datetime.fromtimestamp(event.timestamp / 1000.0, tz=timezone.utc)
-            
             record = (
                 local_dt,
                 exch_dt,
@@ -96,22 +98,17 @@ class BufferedTickWriter:
             )
             self.tick_buffer.append(record)
 
-        # 2. СТАКАНЫ
+        # 2. СТАКАНЫ (КРИТИЧЕСКАЯ СЕКЦИЯ ПО СКОРОСТИ)
         elif event_type == 'depth':
-            local_dt = datetime.now(timezone.utc)
-            exch_dt = datetime.fromtimestamp(event.timestamp / 1000.0, tz=timezone.utc)
-            
-            # [FIX] Явная сериализация в строку JSON.
-            # Это решает проблему "no binary format encoder".
-            bids_list = [[b.price, b.quantity] for b in event.bids]
-            asks_list = [[a.price, a.quantity] for a in event.asks]
+            # Делегируем сериализацию отдельному классу (он юзает orjson)
+            bids_json, asks_json = MarketDataSerializer.serialize_depth(event.bids, event.asks)
             
             record = (
                 local_dt,
                 exch_dt,
                 event.symbol,
-                json.dumps(bids_list), # <-- Строка!
-                json.dumps(asks_list), # <-- Строка!
+                bids_json, # Быстрая строка JSON
+                asks_json, 
                 event.is_snapshot
             )
             self.depth_buffer.append(record)
@@ -120,7 +117,7 @@ class BufferedTickWriter:
         if len(self.tick_buffer) >= self.batch_size:
             await self._flush_ticks()
         
-        # Стаканы большие, сбрасываем их чаще (например, каждые 10 штук или даже чаще)
+        # Стаканы "тяжелее", сбрасываем чаще
         if len(self.depth_buffer) >= 10: 
             await self._flush_depth()
 
@@ -130,6 +127,7 @@ class BufferedTickWriter:
 
     async def _flush_ticks(self):
         if self.tick_buffer:
+            # Быстрое копирование списка и очистка
             ticks_to_save = self.tick_buffer[:]
             self.tick_buffer.clear()
             await self.repo.save_ticks(ticks_to_save)
@@ -149,4 +147,5 @@ class BufferedTickWriter:
         self._running = False
         if self._flush_task:
             self._flush_task.cancel()
+        # Финальный сброс остатков
         await self._flush()

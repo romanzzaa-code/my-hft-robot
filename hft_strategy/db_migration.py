@@ -3,13 +3,7 @@ import psycopg2
 import logging
 import sys
 
-DB_CONFIG = {
-    "dbname": "hft_data",
-    "user": "hft_user",
-    "password": "password",
-    "host": "localhost",
-    "port": "5432"
-}
+from config import DB_CONFIG
 
 INIT_SQL = """
 -- 1. Таблица сделок (существует)
@@ -65,7 +59,7 @@ def run_migration():
     
     try:
         logger.info("Connecting to TimescaleDB...")
-        conn = psycopg2.connect(**DB_CONFIG)
+        conn = psycopg2.connect(**DB_CONFIG.as_dict())
         conn.autocommit = True
         
         with conn.cursor() as cur:

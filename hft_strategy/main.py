@@ -4,7 +4,7 @@ import logging
 import sys
 import os
 
-# --- ХАК ДЛЯ ПУТЕЙ ---
+# --- ХАК ДЛЯ ПУТЕЙ (оставляем пока не упакуем в пакет) ---
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 possible_paths = [
     os.path.join(project_root, "hft_core", "build", "Release"),
@@ -18,14 +18,7 @@ for p in possible_paths:
 import hft_core 
 from market_bridge import MarketBridge
 from db_writer import TimescaleRepository, BufferedTickWriter
-
-DB_CONFIG = {
-    "user": "hft_user",
-    "password": "password",
-    "database": "hft_data",
-    "host": "localhost",
-    "port": "5432"
-}
+from config import DB_CONFIG, TRADING_CONFIG # <-- Импортируем конфиги
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,17 +29,16 @@ logger = logging.getLogger("Main")
 
 async def main():
     if sys.platform == 'win32':
-        # Фикс для Windows (asyncio + SelectorEventLoop)
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         
     loop = asyncio.get_running_loop()
     
-    # 1. БД
+    # 1. БД (Inject Config)
     logger.info("🔧 Initializing Database Layer...")
-    repo = TimescaleRepository(DB_CONFIG)
+    # Превращаем dataclass в dict
+    repo = TimescaleRepository(DB_CONFIG.as_dict())
     await repo.connect()
     
-    # Batch size поменьше для теста
     db_writer = BufferedTickWriter(repository=repo, batch_size=100)
     await db_writer.start()
     
@@ -55,31 +47,32 @@ async def main():
     parser = hft_core.BybitParser() 
     streamer = hft_core.ExchangeStreamer(parser)
     
-    # 3. Мост
-    # Bridge сам подпишется на orderbook.50 и publicTrade
-    bridge = MarketBridge("BTCUSDT", streamer, loop)
+    # 3. Мост (Inject Symbol & URL)
+    # Теперь мы можем легко поменять Mainnet на Testnet в config.py
+    bridge = MarketBridge(
+        target_symbol=TRADING_CONFIG.symbol, 
+        ws_url=TRADING_CONFIG.ws_url, 
+        streamer=streamer, 
+        loop=loop
+    )
     
     await bridge.start()
     
-    logger.info("🚀 System is RUNNING. Collecting Trades AND OrderBooks...")
+    logger.info(f"🚀 System RUNNING. Symbol: {TRADING_CONFIG.symbol}")
     
     try:
         while True:
-            # Получаем любое событие (тик или стакан)
             event = await bridge.get_tick()
-            
-            # Отправляем в буфер писателя
             await db_writer.add_event(event)
             
-            # Логгирование для отладки
-            # Если это стакан, покажем лучший бид/аск
+            # Оставим минимальный лог для healthcheck
             if getattr(event, 'type', '') == 'depth':
-                # event.bids - это список объектов PriceLevel
+                 # event.bids - это список объектов PriceLevel
                 best_bid = event.bids[0].price if event.bids else 0
                 best_ask = event.asks[0].price if event.asks else 0
-                print(f"📚 BOOK | Bid: {best_bid} | Ask: {best_ask} | TS: {event.timestamp}")
-            elif getattr(event, 'type', '') == 'trade':
-                pass # Слишком часто, не спамим
+                # Чтобы не спамить, можно выводить раз в N секунд, но пока так
+                # print(f"📚 {TRADING_CONFIG.symbol} | Bid: {best_bid} | Ask: {best_ask}") 
+                pass
 
     except KeyboardInterrupt:
         logger.warning("Shutdown signal received")
