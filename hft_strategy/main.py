@@ -1,9 +1,10 @@
+# hft_strategy/main.py
 import asyncio
 import logging
 import sys
 import os
 
-# --- ХАК ДЛЯ ПУТЕЙ ---
+# --- ХАК ДЛЯ ПУТЕЙ (Оставляем, это необходимо для C++ модуля) ---
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 possible_paths = [
     os.path.join(project_root, "hft_core", "build", "Release"),
@@ -14,10 +15,12 @@ for p in possible_paths:
         sys.path.insert(0, p)
         break
 
-from market_bridge import MarketBridge
-from db_writer import AsyncDBWriter  # <-- ИМПОРТ
+# Теперь импортируем C++ модуль ЗДЕСЬ, чтобы создать зависимости
+import hft_core 
 
-# Конфиг базы
+from market_bridge import MarketBridge
+from db_writer import TimescaleRepository, BufferedTickWriter # Новые классы
+
 DB_CONFIG = {
     "user": "hft_user",
     "password": "password",
@@ -36,33 +39,50 @@ logger = logging.getLogger("Main")
 async def main():
     loop = asyncio.get_running_loop()
     
-    # 1. Инициализируем Писателя
-    db_writer = AsyncDBWriter(DB_CONFIG)
-    await db_writer.connect()
+    # 1. СБОРКА ИНФРАСТРУКТУРЫ (Database)
+    logger.info("🔧 Initializing Database Layer...")
+    repo = TimescaleRepository(DB_CONFIG)
+    await repo.connect()
     
-    # 2. Инициализируем Мост
-    bridge = MarketBridge("BTCUSDT", loop)
+    # Внедряем репозиторий в буфер
+    db_writer = BufferedTickWriter(repository=repo, batch_size=1000)
+    await db_writer.start()
+    
+    # 2. СБОРКА ЯДРА (C++ Core)
+    logger.info("🔧 Initializing C++ Core...")
+    # Создаем стратегию парсинга (можно легко заменить на BinanceParser)
+    parser = hft_core.BybitParser() 
+    
+    # Внедряем парсер в стример
+    streamer = hft_core.ExchangeStreamer(parser)
+    
+    # 3. СБОРКА МОСТА (Application Layer)
+    # Внедряем стример в мост
+    bridge = MarketBridge("BTCUSDT", streamer, loop)
+    
+    # Запуск
     await bridge.start()
     
-    logger.info("🚀 System running. Saving ticks to DB...")
+    logger.info("🚀 System is RUNNING. (Ctrl+C to stop)")
     
     try:
         while True:
-            # 3. Читаем тики и отправляем в БД
+            # Читаем тики из моста
             tick = await bridge.get_tick()
             
-            # Отправляем в писатель (это не блокирует цикл, просто добавляет в буфер)
+            # Пишем в буфер (он сам решит, когда сбросить в БД)
             await db_writer.add_tick(tick)
             
-            # Для отладки выводим каждый 100-й тик
             if tick.timestamp % 100 == 0:
-                 print(f"Tick: {tick.price} -> Buffer: {len(db_writer.buffer)}")
+                 print(f"Tick: {tick.price} -> Buffered: {len(db_writer.buffer)}")
             
     except KeyboardInterrupt:
         logger.warning("Shutdown signal received")
     finally:
+        # Корректное завершение в обратном порядке
         await bridge.stop()
-        await db_writer.stop() # <-- Важно сохранить остатки буфера!
+        await db_writer.stop()
+        await repo.close()
         logger.info("Shutdown complete")
 
 if __name__ == "__main__":
