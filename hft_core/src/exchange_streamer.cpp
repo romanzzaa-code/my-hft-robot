@@ -1,12 +1,12 @@
+// hft_core/src/exchange_streamer.cpp
 #include "exchange_streamer.hpp"
 #include <iostream>
-// !!! ДОБАВЛЕН ВАЖНЫЙ ИНКЛЮД !!!
-#include <ixwebsocket/IXNetSystem.h> 
+#include <ixwebsocket/IXNetSystem.h>
 
 ExchangeStreamer::ExchangeStreamer(std::shared_ptr<IMessageParser> p) 
-    : parser(p) // shared_ptr просто копируется, move не нужен
+    : parser(p) 
 {
-    ix::initNetSystem(); // Теперь эта функция будет найдена
+    ix::initNetSystem();
 }
 
 ExchangeStreamer::~ExchangeStreamer() {
@@ -14,8 +14,12 @@ ExchangeStreamer::~ExchangeStreamer() {
     ix::uninitNetSystem();
 }
 
-void ExchangeStreamer::set_callback(std::function<void(const TickData&)> cb) {
-    callback = cb;
+void ExchangeStreamer::set_tick_callback(std::function<void(const TickData&)> cb) {
+    tick_callback = cb;
+}
+
+void ExchangeStreamer::set_depth_callback(std::function<void(const OrderBookSnapshot&)> cb) {
+    depth_callback = cb;
 }
 
 void ExchangeStreamer::connect(std::string url) {
@@ -24,10 +28,22 @@ void ExchangeStreamer::connect(std::string url) {
 
     webSocket.setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg) {
         if (msg->type == ix::WebSocketMessageType::Message) {
-            TickData tick;
-            // Безопасный вызов парсера
-            if (parser && parser->parse(msg->str, tick)) {
-                 if (callback) callback(tick);
+            
+            // Буферы для результатов
+            TickData temp_tick;
+            OrderBookSnapshot temp_depth;
+            
+            if (parser) {
+                // Вызываем универсальный парсинг
+                ParseResultType result = parser->parse(msg->str, temp_tick, temp_depth);
+                
+                // Маршрутизация
+                if (result == ParseResultType::Trade) {
+                    if (tick_callback) tick_callback(temp_tick);
+                } 
+                else if (result == ParseResultType::Depth) {
+                    if (depth_callback) depth_callback(temp_depth);
+                }
             }
         }
         else if (msg->type == ix::WebSocketMessageType::Open) {
@@ -36,14 +52,7 @@ void ExchangeStreamer::connect(std::string url) {
     });
 }
 
-void ExchangeStreamer::send_message(std::string msg) {
-    webSocket.send(msg);
-}
-
-void ExchangeStreamer::start() {
-    webSocket.start();
-}
-
-void ExchangeStreamer::stop() {
-    webSocket.stop();
-}
+// ... send_message, start, stop без изменений (как в твоем старом коде) ...
+void ExchangeStreamer::send_message(std::string msg) { webSocket.send(msg); }
+void ExchangeStreamer::start() { webSocket.start(); }
+void ExchangeStreamer::stop() { webSocket.stop(); }

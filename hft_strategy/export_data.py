@@ -1,11 +1,13 @@
+# hft_strategy/export_data.py
 import asyncio
 import asyncpg
 import numpy as np
 import logging
-from datetime import datetime
+import json
 import os
+from datetime import datetime
 
-# Конфиг (вынеси в env в продакшене)
+# Конфиг подключения
 DB_CONFIG = {
     "user": "hft_user",
     "password": "password",
@@ -14,85 +16,171 @@ DB_CONFIG = {
     "port": "5432"
 }
 
-# HFTBacktest Data Structure
-# Event types: 1 = TRADE, (мы пока используем только trades)
-TRADE_EVENT_ID = 1 
+# --- КОНСТАНТЫ HFTBACKTEST ---
+# https://github.com/nkaz001/hftbacktest/wiki/Data-Format
+EVENT_TRADE = 1
+EVENT_CLEAR = 2
+EVENT_BID = 3
+EVENT_ASK = 4
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("EXPORTER")
 
-async def export_to_npz(symbol: str, output_file: str):
+async def export_combined_data(symbol: str, output_file: str):
     logger.info(f"⏳ Connecting to DB to export {symbol}...")
     conn = await asyncpg.connect(**DB_CONFIG)
     
     try:
-        # 1. Запрашиваем данные. 
-        # ВАЖНО: hftbacktest требует сортировки по времени
-        query = """
+        # 1. Загружаем СДЕЛКИ (Trades)
+        logger.info("📊 Fetching TRADES...")
+        trades_query = """
             SELECT 
-                EXTRACT(EPOCH FROM time) * 1000000 AS ts_micros, -- Time in microseconds
+                EXTRACT(EPOCH FROM exch_time) * 1000000 AS exch_ts, 
+                EXTRACT(EPOCH FROM time) * 1000000 AS local_ts,
                 price,
                 volume,
                 is_buyer_maker
             FROM market_ticks
             WHERE symbol = $1
-            ORDER BY time ASC
+            ORDER BY exch_time ASC
         """
-        
-        logger.info("📊 Fetching data (this might take time)...")
-        rows = await conn.fetch(query, symbol)
-        
-        if not rows:
-            logger.warning("⚠️ No data found for this symbol.")
-            return
+        trade_rows = await conn.fetch(trades_query, symbol)
+        logger.info(f"✅ Loaded {len(trade_rows)} trades.")
 
-        logger.info(f"✅ Fetched {len(rows)} rows. Processing...")
+        # 2. Загружаем СТАКАНЫ (Snapshots)
+        logger.info("📚 Fetching DEPTH SNAPSHOTS...")
+        # Берем только нужные поля. JSON уже будет строкой или объектом (зависит от драйвера)
+        depth_query = """
+            SELECT 
+                EXTRACT(EPOCH FROM exch_time) * 1000000 AS exch_ts,
+                EXTRACT(EPOCH FROM time) * 1000000 AS local_ts,
+                bids,
+                asks
+            FROM market_depth_snapshots
+            WHERE symbol = $1
+            ORDER BY exch_time ASC
+        """
+        depth_rows = await conn.fetch(depth_query, symbol)
+        logger.info(f"✅ Loaded {len(depth_rows)} snapshots.")
 
-        # 2. Создаем структуру для hftbacktest
-        # Формат: [Event, ExchTS, LocalTS, Price, Qty, ...]
-        # Так как у нас нет LocalTS, мы временно используем ExchTS для обоих полей
+        # 3. Объединение и конвертация в NumPy
+        # Нам нужно заранее оценить размер массива, но это сложно, так как 1 снэпшот = N событий.
+        # Поэтому используем список для сбора, потом конвертируем.
         
+        raw_data = []
+
+        # --- Процессинг Сделок ---
+        for row in trade_rows:
+            # Trade Event: [Event, ExchTS, LocalTS, Price, Qty, ...]
+            # Флаг is_buyer_maker часто кодируется в sign(qty) или flags, но для простоты пока так:
+            # HftBacktest использует 'ev' для типа.
+            
+            # Важно: hftbacktest требует, чтобы данные были отсортированы.
+            # Мы добавим их в общий котел.
+            
+            evt = [
+                EVENT_TRADE,              # ev
+                int(row['exch_ts']),      # exch_ts
+                int(row['local_ts']),     # local_ts
+                float(row['price']),      # px
+                float(row['volume']),     # qty
+                0, 0, 0                   # ival, f, res (резерв)
+            ]
+            raw_data.append(evt)
+
+        # --- Процессинг Стаканов ---
+        for row in depth_rows:
+            ts_exch = int(row['exch_ts'])
+            ts_local = int(row['local_ts'])
+            
+            # Десериализация JSON (asyncpg возвращает строку для jsonb)
+            bids = json.loads(row['bids']) if isinstance(row['bids'], str) else row['bids']
+            asks = json.loads(row['asks']) if isinstance(row['asks'], str) else row['asks']
+            
+            # ВАЖНО: Перед каждым снимком вставляем событие CLEAR, 
+            # чтобы бэктестер "забыл" старые уровни.
+            # Это имитирует приход полного снэпшота.
+            raw_data.append([
+                EVENT_CLEAR, 
+                ts_exch, 
+                ts_local, 
+                0, 0, 0, 0, 0
+            ])
+            
+            # Добавляем Биды
+            if bids:
+                for price, qty in bids:
+                    raw_data.append([
+                        EVENT_BID, 
+                        ts_exch, 
+                        ts_local, 
+                        float(price), 
+                        float(qty), 
+                        0, 0, 0
+                    ])
+            
+            # Добавляем Аски
+            if asks:
+                for price, qty in asks:
+                    raw_data.append([
+                        EVENT_ASK, 
+                        ts_exch, 
+                        ts_local, 
+                        float(price), 
+                        float(qty), 
+                        0, 0, 0
+                    ])
+
+        logger.info(f"🔨 Merging and Sorting {len(raw_data)} total events...")
+        
+        # 4. Создаем Structured Array
         dtype = [
             ('ev', 'i8'),         # Event Type
             ('exch_ts', 'i8'),    # Exchange Timestamp
             ('local_ts', 'i8'),   # Local Timestamp
             ('px', 'f8'),         # Price
             ('qty', 'f8'),        # Quantity
-            ('ival', 'i8'),       # Reserved (Instrument Value?)
+            ('ival', 'i8'),       # Reserved
             ('f', 'i8'),          # Flags
             ('res', 'i8')         # Reserved
         ]
         
-        data = np.zeros(len(rows), dtype=dtype)
+        # Конвертируем список списков в numpy array
+        # Это может занять память, если данных много. В продакшене лучше писать чанками.
+        data_np = np.array([tuple(x) for x in raw_data], dtype=dtype)
         
-        # Заполняем массив (векторизация тут сложна из-за asyncpg, делаем цикл или pandas)
-        # Для скорости лучше использовать итерацию, если памяти мало
+        # 5. Сортировка
+        # Сортируем по времени биржи (exch_ts). 
+        # Если время совпадает (снэпшот), порядок внутри важен (Clear -> Bids/Asks),
+        # но наш алгоритм добавления (append) уже сохранил этот порядок для одного TS.
+        # sort order: exch_ts, then event type (Trade=1 vs Clear=2 is tricky, usually snapshot updates precede trades at same micros?)
+        # Оставим просто по времени, полагаясь на стабильность сортировки (mergesort).
         
-        for i, row in enumerate(rows):
-            ts = int(row['ts_micros'])
-            price = float(row['price'])
-            qty = float(row['volume'])
-            
-            # В HFTBacktest 'buy' или 'sell' часто определяются флагом. 
-            # Для простоты: Event=1 (Trade).
-            # Maker/Taker флаги можно упаковать в 'f', но пока оставим простым.
-            
-            data[i]['ev'] = TRADE_EVENT_ID
-            data[i]['exch_ts'] = ts
-            data[i]['local_ts'] = ts # ⚠️ HACK: Нет локального времени
-            data[i]['px'] = price
-            data[i]['qty'] = qty
+        data_np.sort(order=['exch_ts'])
+        
+        # 6. Коррекция Local TS (если локальное время "убежало" назад или рассинхрон)
+        # HftBacktest падает, если local_ts < exch_ts.
+        # Исправим это грубо: local_ts = max(local_ts, exch_ts)
+        mask = data_np['local_ts'] < data_np['exch_ts']
+        if np.any(mask):
+            logger.warning(f"⚠️ Fixing {np.sum(mask)} timestamps where Local < Exchange")
+            data_np['local_ts'][mask] = data_np['exch_ts'][mask]
 
-        # 3. Сохраняем в NPZ
-        # hftbacktest ищет файл по имени (обычно)
+        # 7. Сохранение
+        os.makedirs("data", exist_ok=True)
         logger.info(f"💾 Saving to {output_file}...")
-        np.savez_compressed(output_file, data=data)
-        logger.info("🎉 Export complete!")
+        np.savez_compressed(output_file, data=data_np)
+        
+        # Валидация
+        logger.info(f"🎉 Export complete! File size: {os.path.getsize(output_file) / 1024 / 1024:.2f} MB")
+        logger.info(f"Events breakdown: Trades={len(trade_rows)}, Snapshots={len(depth_rows)}, Total Rows={len(data_np)}")
 
     finally:
         await conn.close()
 
 if __name__ == "__main__":
-    # Убедись, что папка data существует
-    os.makedirs("data", exist_ok=True)
-    asyncio.run(export_to_npz("BTCUSDT", "data/btcusdt_trades.npz"))
+    # Запускать лучше, когда наберется хотя бы 5-10 минут данных
+    try:
+        asyncio.run(export_combined_data("BTCUSDT", "data/btcusdt_full.npz"))
+    except KeyboardInterrupt:
+        pass

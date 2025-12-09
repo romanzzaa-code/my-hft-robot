@@ -1,13 +1,15 @@
 #pragma once
 
-#include "entities/tick_data.hpp"  // Подключаем структуру TickData
-#include "imessage_parser.hpp"  // Подключаем интерфейс
-#include <simdjson.h>  // Для парсинга JSON
+#include "entities/tick_data.hpp"
+#include "entities/market_depth.hpp" // <-- Добавляем
+#include "imessage_parser.hpp"
+#include <simdjson.h>
 
 class BinanceParser : public IMessageParser {
 public:
-    bool parse(const std::string& payload, TickData& out_tick) override;
+    // Обновленная сигнатура (override)
+    ParseResultType parse(const std::string& payload, TickData& out_tick, OrderBookSnapshot& out_depth) override;
 
 private:
-    simdjson::ondemand::parser parser_instance;  // Экземпляр парсера
+    simdjson::ondemand::parser parser_instance;
 };

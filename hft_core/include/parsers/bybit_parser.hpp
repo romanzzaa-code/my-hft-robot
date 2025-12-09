@@ -1,13 +1,12 @@
 #pragma once
 #include "imessage_parser.hpp"
-#include <simdjson.h> // Нужно для объекта парсера
+#include <simdjson.h>
 
 class BybitParser : public IMessageParser {
 public:
-    // Только объявление функции (в конце точка с запятой)
-    bool parse(const std::string& payload, TickData& out_tick) override;
+    // Implementation of the unified parsing interface
+    ParseResultType parse(const std::string& payload, TickData& out_tick, OrderBookSnapshot& out_depth) override;
 
 private:
-    // Экземпляр парсера храним внутри класса, чтобы не пересоздавать его каждый раз
-    simdjson::ondemand::parser parser_; 
+    simdjson::ondemand::parser parser_;
 };

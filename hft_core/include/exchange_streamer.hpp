@@ -1,14 +1,15 @@
+// hft_core/include/exchange_streamer.hpp
 #pragma once
 #include <string>
 #include <functional>
-#include <memory>         // для std::unique_ptr
+#include <memory>
 #include <ixwebsocket/IXWebSocket.h>
-#include "entities/tick_data.hpp"  // Новое место TickData
-#include "parsers/imessage_parser.hpp" // Интерфейс
+#include "entities/tick_data.hpp"
+#include "entities/market_depth.hpp" // <-- Добавили
+#include "parsers/imessage_parser.hpp"
 
 class ExchangeStreamer {
 public:
-    // Конструктор теперь требует парсер!
     ExchangeStreamer(std::shared_ptr<IMessageParser> parser);
     ~ExchangeStreamer();
 
@@ -16,10 +17,17 @@ public:
     void start();
     void stop();
     void send_message(std::string msg);
-    void set_callback(std::function<void(const TickData&)> cb);
+
+    // Старый коллбек для тиков
+    void set_tick_callback(std::function<void(const TickData&)> cb);
+    // Новый коллбек для стаканов
+    void set_depth_callback(std::function<void(const OrderBookSnapshot&)> cb);
 
 private:
     ix::WebSocket webSocket;
-    std::function<void(const TickData&)> callback;
-    std::shared_ptr<IMessageParser> parser; // Храним shared_ptr
+    std::shared_ptr<IMessageParser> parser;
+    
+    // Два отдельных коллбека
+    std::function<void(const TickData&)> tick_callback;
+    std::function<void(const OrderBookSnapshot&)> depth_callback;
 };
