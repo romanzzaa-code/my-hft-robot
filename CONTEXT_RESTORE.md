@@ -241,3 +241,70 @@ hft_strategy/
 ├── export_data.py                   (Updated: Streaming cursors)
 ├── main.py                          (Updated: Composition Root)
 └── db_migration.py                  (SQL schema init)
+
+
+# 🔥 HFT Robot Project Context (Restore Point)
+**Date:** 09.12.2025 (Updated)
+**Role:** Lead Quantitative Developer (Code Critic Persona)
+**Status:** Phase 2.5 Completed (Funnel Architecture & Multi-Asset Support)
+
+## 🎯 Цель проекта
+Создание самообучающегося HFT-робота для скальпинга "от плотностей" (Wall Bounce) на Bybit (Master Trader Copytrading).
+**Текущий фокус:** Накопление данных по Топ-5 самых ликвидных монет (Smart Selection).
+
+---
+
+## 🏗 Текущая Архитектура (Funnel Architecture)
+Реализована профессиональная схема отбора инструментов ("Воронка"), позволяющая мониторить 200+ монет без перегрузки железа:
+
+1.  **Level 1: Discovery (Разведка)**
+    -   `BybitInstrumentProvider`: Раз в 24 часа запрашивает у API список всех USDT-перпетуалов, доступных для CopyTrading (исключая BTC/ETH).
+2.  **Level 2: Surveillance (Наблюдение)**
+    -   `ExchangeStreamer` (C++): Подписывается на легкий поток `tickers` для всего списка (200+ монет).
+    -   `TickerData`: Новая C++ сущность для хранения макро-статистики (оборот, цена).
+3.  **Level 3: Analytics (Анализ)**
+    -   `MarketScanner` (Python): В реальном времени ранжирует монеты по обороту (`turnover_24h`).
+4.  **Level 4: Execution (Фокусировка)**
+    -   `MarketBridge`: Автоматически ротирует "тяжелые" подписки (`orderbook.50` + `publicTrade`) для Топ-5 горячих монет.
+    -   `BufferedTickWriter`: Пишет в TimescaleDB полные данные только по избранным активам.
+
+---
+
+## ✅ Что сделано (Completed Tasks)
+
+### 1. C++ Core (Low-Latency Layer)
+* [x] **New Entity:** Добавлена структура `TickerData` (symbol, turnover, price change).
+* [x] **Parser Upgrade:** Интерфейс `IMessageParser` расширен для поддержки тикеров. `BybitParser` научился парсить топик `tickers`. `BinanceParser` обновлен для совместимости.
+* [x] **Routing:** В `ExchangeStreamer` добавлен отдельный канал `set_ticker_callback`, который не смешивается с потоком сделок.
+* [x] **Python Bindings:** Экспортированы `TickerData` и коллбеки через `pybind11`.
+
+### 2. Python Services (Strategy Layer)
+* [x] **Service Layer:** Создана папка `services/` для декомпозиции логики.
+* [x] **Instrument Provider:** Реализован фильтр монет (CopyTrading check, Blacklist BTC/ETH).
+* [x] **Market Scanner:** Реализован алгоритм ранжирования (O(1) update, O(N log N) sort).
+* [x] **Smart Bridge:** `MarketBridge` теперь умеет управлять двумя потоками подписок (Tickers vs Heavy Data) и синхронизировать их (Diff logic).
+
+### 3. Orchestration
+* [x] **Background Tasks:** В `main.py` запущены циклы `daily_discovery_loop` и `hot_rotation_loop`.
+* [x] **Direct Wiring:** Тикеры из C++ передаются в Сканер напрямую через lambda, минуя `asyncio.Queue` (Zero-Overhead).
+
+---
+
+## 📂 Структура файлов (Актуальная)
+```text
+hft_core/
+├── include/
+│   ├── entities/ticker_data.hpp     (🔥 NEW: Ticker Entity)
+│   ├── parsers/imessage_parser.hpp  (Updated: 4-arg signature)
+│   └── exchange_streamer.hpp        (Updated: Ticker callback)
+├── src/
+│   ├── parsers/bybit_parser.cpp     (Updated: Parsing logic)
+│   └── main.cpp                     (Updated: Pybind11 exports)
+hft_strategy/
+├── services/                        (🔥 NEW: Service Layer)
+│   ├── instrument_provider.py       (Discovery)
+│   └── market_scanner.py            (Analytics)
+├── config.py
+├── market_bridge.py                 (Updated: Smart Subscriptions)
+├── main.py                          (Updated: Funnel Logic)
+└── db_writer.py

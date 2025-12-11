@@ -3,12 +3,14 @@
 #include <pybind11/stl.h> 
 #include "exchange_streamer.hpp"
 #include "parsers/bybit_parser.hpp"
+#include "entities/ticker_data.hpp" // <--- Важно!
 
 namespace py = pybind11;
 
 PYBIND11_MODULE(hft_core, m) {
-    // --- Entities ---
-    // [FIX] Добавлен py::dynamic_attr() для поддержки setattr() в Python
+    // ... (TickData, PriceLevel, OrderBookSnapshot, IMessageParser, BybitParser остаются как были) ...
+    
+    // Повторю для контекста, но убедись, что не удаляешь старое:
     py::class_<TickData>(m, "TickData", py::dynamic_attr())
         .def_readonly("symbol", &TickData::symbol)
         .def_readonly("price", &TickData::price)
@@ -19,7 +21,6 @@ PYBIND11_MODULE(hft_core, m) {
         .def_readonly("price", &PriceLevel::price)
         .def_readonly("quantity", &PriceLevel::quantity);
 
-    // [FIX] Добавлен py::dynamic_attr()
     py::class_<OrderBookSnapshot>(m, "OrderBookSnapshot", py::dynamic_attr())
         .def_readonly("symbol", &OrderBookSnapshot::symbol)
         .def_readonly("timestamp", &OrderBookSnapshot::timestamp)
@@ -28,7 +29,14 @@ PYBIND11_MODULE(hft_core, m) {
         .def_readonly("asks", &OrderBookSnapshot::asks)
         .def_readonly("is_snapshot", &OrderBookSnapshot::is_snapshot);
 
-    // --- Interfaces ---
+    // [NEW] Экспорт новой сущности TickerData
+    py::class_<TickerData>(m, "TickerData", py::dynamic_attr())
+        .def_readonly("symbol", &TickerData::symbol)
+        .def_readonly("last_price", &TickerData::last_price)
+        .def_readonly("turnover_24h", &TickerData::turnover_24h)
+        .def_readonly("price_24h_pcnt", &TickerData::price_24h_pcnt)
+        .def_readonly("timestamp", &TickerData::timestamp);
+
     py::class_<IMessageParser, std::shared_ptr<IMessageParser>>(m, "IMessageParser");
 
     py::class_<BybitParser, IMessageParser, std::shared_ptr<BybitParser>>(m, "BybitParser")
@@ -51,6 +59,13 @@ PYBIND11_MODULE(hft_core, m) {
             self.set_depth_callback([cb](const OrderBookSnapshot& d) {
                 py::gil_scoped_acquire acquire; 
                 cb(d);
+            });
+        })
+        // [NEW] Биндинг для тикеров (с защитой GIL)
+        .def("set_ticker_callback", [](ExchangeStreamer &self, std::function<void(const TickerData&)> cb) {
+            self.set_ticker_callback([cb](const TickerData& t) {
+                py::gil_scoped_acquire acquire; 
+                cb(t);
             });
         });
 }

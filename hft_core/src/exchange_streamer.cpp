@@ -1,8 +1,8 @@
-// hft_core/src/exchange_streamer.cpp
 #include "exchange_streamer.hpp"
 #include <iostream>
 #include <ixwebsocket/IXNetSystem.h>
 
+// ... конструктор и деструктор без изменений ...
 ExchangeStreamer::ExchangeStreamer(std::shared_ptr<IMessageParser> p) 
     : parser(p) 
 {
@@ -14,12 +14,18 @@ ExchangeStreamer::~ExchangeStreamer() {
     ix::uninitNetSystem();
 }
 
+// ... старые сеттеры ...
 void ExchangeStreamer::set_tick_callback(std::function<void(const TickData&)> cb) {
     tick_callback = cb;
 }
 
 void ExchangeStreamer::set_depth_callback(std::function<void(const OrderBookSnapshot&)> cb) {
     depth_callback = cb;
+}
+
+// [NEW] Сеттер для тикеров
+void ExchangeStreamer::set_ticker_callback(std::function<void(const TickerData&)> cb) {
+    ticker_callback = cb;
 }
 
 void ExchangeStreamer::connect(std::string url) {
@@ -29,20 +35,24 @@ void ExchangeStreamer::connect(std::string url) {
     webSocket.setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg) {
         if (msg->type == ix::WebSocketMessageType::Message) {
             
-            // Буферы для результатов
+            // Создаем буферы для всех типов данных
             TickData temp_tick;
             OrderBookSnapshot temp_depth;
+            TickerData temp_ticker; // <--- Новый буфер
             
             if (parser) {
-                // Вызываем универсальный парсинг
-                ParseResultType result = parser->parse(msg->str, temp_tick, temp_depth);
+                // Передаем все три буфера в парсер
+                ParseResultType result = parser->parse(msg->str, temp_tick, temp_depth, temp_ticker);
                 
-                // Маршрутизация
+                // Маршрутизация на основе результата
                 if (result == ParseResultType::Trade) {
                     if (tick_callback) tick_callback(temp_tick);
                 } 
                 else if (result == ParseResultType::Depth) {
                     if (depth_callback) depth_callback(temp_depth);
+                }
+                else if (result == ParseResultType::Ticker) { // <--- Новая ветка
+                    if (ticker_callback) ticker_callback(temp_ticker);
                 }
             }
         }
@@ -52,7 +62,7 @@ void ExchangeStreamer::connect(std::string url) {
     });
 }
 
-// ... send_message, start, stop без изменений (как в твоем старом коде) ...
+// ... остальное (send_message, start, stop) без изменений ...
 void ExchangeStreamer::send_message(std::string msg) { webSocket.send(msg); }
 void ExchangeStreamer::start() { webSocket.start(); }
 void ExchangeStreamer::stop() { webSocket.stop(); }

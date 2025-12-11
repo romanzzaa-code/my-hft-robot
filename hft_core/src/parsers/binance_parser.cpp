@@ -1,12 +1,12 @@
 #include "../../include/parsers/binance_parser.hpp"
+#include "../../include/entities/ticker_data.hpp" // <--- Инклюд
 #include <iostream>
 #include <charconv>
 
+// ... (функция extract_double без изменений) ...
 static double extract_double(simdjson::ondemand::value val) {
     double res = 0.0;
-    if (auto num = val.get_double(); !num.error()) {
-        return num.value();
-    }
+    if (auto num = val.get_double(); !num.error()) return num.value();
     std::string_view sv;
     if (auto str = val.get_string(); !str.error()) {
         sv = str.value();
@@ -17,15 +17,20 @@ static double extract_double(simdjson::ondemand::value val) {
     return 0.0;
 }
 
-ParseResultType BinanceParser::parse(const std::string& payload, TickData& out_tick, OrderBookSnapshot& out_depth) {
-    // SIMD padding
+// Обновляем реализацию
+ParseResultType BinanceParser::parse(
+    const std::string& payload, 
+    TickData& out_tick, 
+    OrderBookSnapshot& out_depth,
+    TickerData& out_ticker // <--- Принимаем аргумент, но пока игнорируем его
+) {
     simdjson::padded_string json_data(payload);
     
     try {
         auto doc = parser_instance.iterate(json_data);
         auto obj = doc.get_object();
         
-        // Логика Binance (только тики пока)
+        // ... (старая логика парсинга тиков) ...
         double price = 0.0;
         double vol = 0.0;
         long long ts = 0;
@@ -43,10 +48,9 @@ ParseResultType BinanceParser::parse(const std::string& payload, TickData& out_t
 
         if (price > 0) {
             out_tick = {symbol_str, price, vol, ts};
-            return ParseResultType::Trade; // <-- Возвращаем новый Enum
+            return ParseResultType::Trade;
         }
     } catch (...) {
-        // Ignore parsing errors
     }
     return ParseResultType::None;
 }

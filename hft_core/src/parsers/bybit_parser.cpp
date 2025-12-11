@@ -1,8 +1,10 @@
 #include "../../include/parsers/bybit_parser.hpp" 
+#include "../../include/entities/ticker_data.hpp" // <--- Не забудь этот инклюд!
 #include <iostream>
 #include <charconv>
 #include <chrono>
 
+// Вспомогательная функция (оставь как есть, если она уже была)
 static double extract_double(simdjson::ondemand::value val) {
     double res = 0.0;
     if (auto num = val.get_double(); !num.error()) {
@@ -12,6 +14,7 @@ static double extract_double(simdjson::ondemand::value val) {
     if (auto str = val.get_string(); !str.error()) {
         sv = str.value();
         if (sv.empty()) return 0.0;
+        // Пытаемся распарсить строку
         std::from_chars(sv.data(), sv.data() + sv.size(), res);
         return res;
     }
@@ -25,7 +28,13 @@ static double extract_from_result(simdjson::simdjson_result<simdjson::ondemand::
     return 0.0;
 }
 
-ParseResultType BybitParser::parse(const std::string& payload, TickData& out_tick, OrderBookSnapshot& out_depth) {
+// Обновленная сигнатура метода parse
+ParseResultType BybitParser::parse(
+    const std::string& payload, 
+    TickData& out_tick, 
+    OrderBookSnapshot& out_depth,
+    TickerData& out_ticker // <--- Новый аргумент
+) {
     simdjson::padded_string json_data(payload);
     
     try {
@@ -37,13 +46,43 @@ ParseResultType BybitParser::parse(const std::string& payload, TickData& out_tic
             return ParseResultType::None;
         }
 
-        // --- TRADES ---
-        if (topic_sv.find("publicTrade") != std::string_view::npos) {
+        // ==========================================
+        // 1. ЛОГИКА ТИКЕРОВ (НОВАЯ)
+        // ==========================================
+        if (topic_sv.find("tickers") != std::string_view::npos) {
+            simdjson::ondemand::object data_obj;
+            
+            // В Bybit V5 Linear ticker -> data это Object, а не Array
+            if (obj["data"].get_object().get(data_obj)) {
+                 return ParseResultType::None;
+            }
+
+            std::string_view sym;
+            if (!data_obj["symbol"].get_string().get(sym)) out_ticker.symbol = std::string(sym);
+            
+            // Извлекаем ключевые метрики для сканера
+            if (auto f = data_obj["lastPrice"]; !f.error()) out_ticker.last_price = extract_double(f.value());
+            if (auto f = data_obj["turnover24h"]; !f.error()) out_ticker.turnover_24h = extract_double(f.value());
+            if (auto f = data_obj["price24hPcnt"]; !f.error()) out_ticker.price_24h_pcnt = extract_double(f.value());
+
+            // Timestamp события
+            int64_t ts = 0;
+            if (auto f = obj["ts"]; !f.error()) f.get_int64().get(ts);
+            out_ticker.timestamp = ts;
+
+            return ParseResultType::Ticker;
+        }
+
+        // ==========================================
+        // 2. ЛОГИКА СДЕЛОК (Как было)
+        // ==========================================
+        else if (topic_sv.find("publicTrade") != std::string_view::npos) {
             simdjson::ondemand::array data_arr;
             if (!obj["data"].get(data_arr)) {
                 for (auto trade_val : data_arr) {
                     auto trade_obj = trade_val.get_object();
                     double price = 0.0; double vol = 0.0; int64_t ts = 0; std::string symbol_str;
+                    
                     if (auto f = trade_obj["p"]; !f.error()) price = extract_double(f.value());
                     if (auto f = trade_obj["v"]; !f.error()) vol = extract_double(f.value());
                     if (auto f = trade_obj["s"]; !f.error()) { std::string_view sv; f.value().get_string().get(sv); symbol_str = std::string(sv); }
@@ -56,7 +95,10 @@ ParseResultType BybitParser::parse(const std::string& payload, TickData& out_tic
                 }
             }
         }
-        // --- ORDERBOOK (Snapshot + Delta) ---
+        
+        // ==========================================
+        // 3. ЛОГИКА СТАКАНА (Как было)
+        // ==========================================
         else if (topic_sv.find("orderbook") != std::string_view::npos) {
             std::string_view type_sv;
             if (obj["type"].get_string().get(type_sv)) return ParseResultType::None;
@@ -66,9 +108,7 @@ ParseResultType BybitParser::parse(const std::string& payload, TickData& out_tic
 
             if (is_snapshot || is_delta) {
                 simdjson::ondemand::object data_obj;
-                if (obj["data"].get_object().get(data_obj)) {
-                    return ParseResultType::None;
-                }
+                if (obj["data"].get_object().get(data_obj)) return ParseResultType::None;
                 
                 std::string_view sym;
                 if (!data_obj["s"].get_string().get(sym)) out_depth.symbol = std::string(sym);
@@ -105,8 +145,6 @@ ParseResultType BybitParser::parse(const std::string& payload, TickData& out_tic
                 parse_levels(data_obj, "b", out_depth.bids);
                 parse_levels(data_obj, "a", out_depth.asks);
 
-                // Возвращаем результат, даже если уровни пустые (для дельт это нормально)
-                // Главное - обновить timestamp
                 return ParseResultType::Depth;
             }
         }

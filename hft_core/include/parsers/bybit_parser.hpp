@@ -4,8 +4,13 @@
 
 class BybitParser : public IMessageParser {
 public:
-    // Implementation of the unified parsing interface
-    ParseResultType parse(const std::string& payload, TickData& out_tick, OrderBookSnapshot& out_depth) override;
+    // Обновляем сигнатуру override метода
+    ParseResultType parse(
+        const std::string& payload, 
+        TickData& out_tick, 
+        OrderBookSnapshot& out_depth,
+        TickerData& out_ticker // <--- Добавили
+    ) override;
 
 private:
     simdjson::ondemand::parser parser_;
