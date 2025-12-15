@@ -37,6 +37,6 @@ DB_CONFIG = DatabaseConfig(
 )
 
 TRADING_CONFIG = TradingConfig(
-    symbol="BTCUSDT",
+    symbol="SOLUSDT",
     ws_url="wss://stream.bybit.com/v5/public/linear"
 )

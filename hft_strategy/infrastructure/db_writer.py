@@ -2,12 +2,12 @@
 import asyncio
 import asyncpg
 import logging
-# import json  <-- Убрали медленный json
+# import json <-- Убрали медленный json
 from datetime import datetime, timezone
 from typing import List, Tuple, Any
 
 # Импортируем наш быстрый сериализатор (SRP)
-from serializers import MarketDataSerializer
+from hft_strategy.infrastructure.serializers import MarketDataSerializer
 
 logger = logging.getLogger("DB_WRITER")
 
@@ -84,7 +84,7 @@ class BufferedTickWriter:
         
         # Оптимизация: берем время один раз
         local_dt = datetime.now(timezone.utc)
-        exch_dt = datetime.fromtimestamp(event.timestamp / 1000.0, tz=timezone.utc)
+        exch_dt = datetime.fromtimestamp(event.timestamp / 100.0, tz=timezone.utc)
 
         # 1. ТИКИ
         if event_type == 'trade':
