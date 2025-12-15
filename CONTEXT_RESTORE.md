@@ -451,3 +451,70 @@ hft_strategy/
 
 3.  **Визуализация (Опционально):**
     * Построить график Equity Curve на основе данных из `stats_sol.npz`.
+
+    # 🔥 HFT Robot Project Context (Restore Point)
+**Date:** 15.12.2025
+**Role:** Lead Quantitative Developer (Code Critic Persona)
+**Status:** Phase 3 Completed (Strategy Optimized & Live Bot Ready)
+
+## 🎯 Цель проекта
+Создание самообучающегося HFT-робота для скальпинга "от плотностей" (Wall Bounce) на Bybit (Master Trader Copytrading).
+**Текущий фокус:** Запуск Live-торговли на реальные деньги (Real Money).
+
+---
+
+## 🏗 Архитектура (Clean & Scalable)
+Мы провели масштабный рефакторинг и стабилизировали систему:
+
+1.  **Structure:** Внедрена Clean Architecture:
+    -   `domain/`: Константы (`events.py`) и конфиги (`strategy_config.py`).
+    -   `infrastructure/`: Исполнение ордеров (`execution.py`), Мост (`market_bridge.py`), БД (`db_writer.py`).
+    -   `strategies/`: Логика (`wall_bounce.py` для Numba, `live_strategy.py` для AsyncIO).
+    -   `pipelines/`: ETL процессы (`export_data.py`).
+    
+2.  **Backtesting Engine:**
+    -   Успешно проведены бэктесты на 1.2 млн событий (SOLUSDT).
+    -   **Optuna** нашла оптимальные параметры (`wall=105.0`, `tp=5`, `sl=36`).
+    -   Визуализация доказала корректность работы State Machine (робот не "залипает" в позициях).
+
+3.  **Live Core:**
+    -   **C++:** Пересобран `hft_core.pyd` (Release) с поддержкой парсинга тикеров и стаканов.
+    -   **Python:** Реализован `live_bot.py` с автоматическим Path Hack для загрузки C++ ядра.
+    -   **Execution:** `BybitExecutionHandler` (pybit) поддерживает Read-Only режим и реальную торговлю.
+
+---
+
+## ✅ Что сделано (Completed Tasks)
+
+### 1. Optimization & Validation
+* [x] **Strategy Logic:** Исправлен баг "Death Spiral" (замена `GTX` на `GTC` для Stop Loss). Теперь робот корректно кроет убытки.
+* [x] **Parameter Tuning:** Скрипт `optimization.py` автоматически подобрал параметры с положительным Sharpe Ratio.
+* [x] **Visualization:** `visualize.py` строит график Equity/Position, подтверждая адекватность логики.
+
+### 2. Live Environment Setup
+* [x] **Dependencies:** Установлен и проверен `pybit`. `requirements.txt` обновлен.
+* [x] **Environment:** Настроена загрузка `.env` через `python-dotenv`.
+* [x] **Compilation:** C++ ядро успешно скомпилировано и линкуется в Python.
+* [x] **Simulation Test:** Бот запущен в режиме `READ-ONLY`. Логи подтверждают:
+    -   C++ парсер видит стакан.
+    -   Стратегия детектирует стены (`🧱 WALL DETECTED`).
+    -   Исполнитель симулирует отправку ордеров (`🕶️ [SIM] PLACING`).
+
+---
+
+## 📂 Структура файлов (Ключевые)
+```text
+hft_strategy/
+├── domain/
+│   ├── events.py                    (SSOT для флагов)
+│   └── strategy_config.py           (Параметры: Wall=105.0)
+├── infrastructure/
+│   ├── execution.py                 (Bybit API Wrapper)
+│   └── market_bridge.py             (C++ -> Python Adapter)
+├── strategies/
+│   ├── wall_bounce.py               (Numba logic for Backtest)
+│   └── live_strategy.py             (Async logic for Live)
+├── live_bot.py                      (🔥 ENTRY POINT: Live Trading)
+├── backtest_bot.py                  (Entry Point: Backtest)
+├── optimization.py                  (Optuna Tuner)
+└── visualize.py                     (Matplotlib Charts)

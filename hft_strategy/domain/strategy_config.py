@@ -27,7 +27,7 @@ KNOWN_CONFIGS: Dict[str, StrategyParameters] = {
         wall_vol_threshold=105.0, 
         stop_loss_ticks=36,       
         take_profit_ticks=5,      
-        order_qty=1.0 # 1 SOL для теста
+        order_qty=0.1 # 1 SOL для теста
     ),
 }
 
