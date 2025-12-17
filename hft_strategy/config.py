@@ -2,6 +2,20 @@
 import os
 from dataclasses import dataclass
 
+# ==========================================
+# 🎛️ ПАНЕЛЬ УПРАВЛЕНИЯ (МЕНЯТЬ ТОЛЬКО ЗДЕСЬ)
+# ==========================================
+
+# 1. Какой монетой торгуем?
+TARGET_COIN = "AAVEUSDT" 
+
+# 2. Сколько денег вкладываем в один ордер (в $)?
+INVESTMENT_USDT = 30.0   
+
+# ==========================================
+# ⚙️ СИСТЕМНЫЕ НАСТРОЙКИ (ЛУЧШЕ НЕ ТРОГАТЬ)
+# ==========================================
+
 @dataclass
 class DatabaseConfig:
     user: str
@@ -22,13 +36,9 @@ class DatabaseConfig:
 @dataclass
 class TradingConfig:
     symbol: str
-    # Bybit Mainnet: wss://stream.bybit.com/v5/public/linear
-    # Bybit Testnet: wss://stream-testnet.bybit.com/v5/public/linear
     ws_url: str = "wss://stream.bybit.com/v5/public/linear"
 
-# --- SINGLE SOURCE OF TRUTH ---
-# В идеале брать из os.getenv(), но для начала соберем хардкод здесь.
-
+# Автоматическая сборка конфигов на основе твоих настроек выше
 DB_CONFIG = DatabaseConfig(
     user=os.getenv("HFT_DB_USER", "hft_user"),
     password=os.getenv("HFT_DB_PASSWORD", "password"),
@@ -37,6 +47,5 @@ DB_CONFIG = DatabaseConfig(
 )
 
 TRADING_CONFIG = TradingConfig(
-    symbol="SOLUSDT",
-    ws_url="wss://stream.bybit.com/v5/public/linear"
+    symbol=TARGET_COIN # <--- Подхватывает твою монету автоматически
 )
