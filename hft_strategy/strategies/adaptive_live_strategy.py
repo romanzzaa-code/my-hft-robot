@@ -1,203 +1,208 @@
 # hft_strategy/strategies/adaptive_live_strategy.py
 import logging
 import asyncio
-import math  # Обязательно для округления
-from enum import Enum
-from dataclasses import dataclass
-from typing import Optional, Dict
+import math
+from typing import Optional
 
-from hft_strategy.infrastructure.execution import BybitExecutionHandler
+# Imports from Layers
 from hft_strategy.domain.strategy_config import StrategyParameters
-
-# Пытаемся импортировать типы для аннотаций
-try:
-    from hft_core import OrderBookSnapshot
-except ImportError:
-    pass
+from hft_strategy.domain.trade_context import StrategyState, TradeContext
+from hft_strategy.infrastructure.execution import BybitExecutionHandler
+from hft_strategy.infrastructure.local_order_book import LocalOrderBook
 
 logger = logging.getLogger("ADAPTIVE_STRAT")
 
-class State(Enum):
-    IDLE = 0
-    ENTRY_SENT = 1
-    IN_POSITION = 2
-    EXIT_SENT = 3
-
-@dataclass
-class ActiveTrade:
-    side: str
-    entry_price: float
-    size: float
-    wall_price: float
-    entry_oid: Optional[str] = None
-    tp_oid: Optional[str] = None
-
 class AdaptiveWallStrategy:
+    """
+    Стратегия 'Отскок от плотностей' с адаптивным трешхолдом.
+    Принцип SOLID: Оркестратор. Делегирует хранение данных в TradeContext и LOB.
+    """
     def __init__(self, executor: BybitExecutionHandler, cfg: StrategyParameters):
+        # Dependencies
         self.exec = executor
         self.cfg = cfg
         
-        self.state = State.IDLE
-        self.trade: Optional[ActiveTrade] = None
+        # State & Data (Domain Layer)
+        self.state = StrategyState.IDLE
+        self.ctx: Optional[TradeContext] = None
         
-        # Metrics
-        self.avg_bid_vol = 0.0
-        self.avg_ask_vol = 0.0
+        # Infrastructure
+        self.lob = LocalOrderBook()
+        self._lock = asyncio.Lock()
+        
+        # Internal Logic Vars
+        self.tick_size = cfg.tick_size
+        self.avg_vol = 0.0 
         self.initialized = False
+        self._last_log_ts = 0
 
-    def _round_to_step(self, value: float, step: float) -> float:
-        """Корректное округление до шага (lot_size или tick_size)"""
-        if step == 0: return value
-        inverse = 1.0 / step
-        return math.floor(value * inverse + 0.0001) / inverse
+    def _update_metrics(self):
+        """Обновляет EMA средней ликвидности на основе фонового объема"""
+        bg_vol = self.lob.get_background_volume()
+        
+        if bg_vol <= 0: return
 
-    async def on_depth(self, snapshot):
-        if not snapshot.bids or not snapshot.asks:
-            return
-
-        best_bid = snapshot.bids[0]
-        best_ask = snapshot.asks[0]
-
-        # 1. EMA Learning (Обучение средней)
         if not self.initialized:
-            self.avg_bid_vol = best_bid.quantity
-            self.avg_ask_vol = best_ask.quantity
+            self.avg_vol = bg_vol
+            logger.info(f"📊 INIT BASELINE: {self.avg_vol:.1f} (Background Liquidity)")
             self.initialized = True
         else:
             alpha = self.cfg.vol_ema_alpha
-            self.avg_bid_vol = alpha * best_bid.quantity + (1 - alpha) * self.avg_bid_vol
-            self.avg_ask_vol = alpha * best_ask.quantity + (1 - alpha) * self.avg_ask_vol
+            self.avg_vol = alpha * bg_vol + (1 - alpha) * self.avg_vol
 
-        # 2. State Machine
-        if self.state == State.IDLE:
-            await self._check_entry_signal(best_bid, best_ask)
-        elif self.state == State.IN_POSITION:
-            await self._check_exit_conditions(snapshot)
-
-    async def _check_entry_signal(self, best_bid, best_ask):
-        # LONG (Bid Wall)
-        # Условие: Объем > Среднего * K
-        is_bid_wall = (best_bid.quantity > self.avg_bid_vol * self.cfg.wall_ratio_threshold)
-        # Доп. условие: Стена должна стоить денег (фильтр дешевых стен)
-        wall_val_usdt = best_bid.quantity * best_bid.price
+    async def on_depth(self, snapshot):
+        """Event Handler - точка входа событий"""
+        if self._lock.locked(): return
         
-        if is_bid_wall and wall_val_usdt > self.cfg.min_wall_value_usdt:
-            logger.info(f"🧱 BID WALL: {best_bid.quantity:.0f} (${wall_val_usdt:.0f}) @ {best_bid.price}")
-            entry_price = best_bid.price + (self.cfg.tick_size * self.cfg.entry_delta_ticks)
-            await self._enter_position("Buy", entry_price, wall_price=best_bid.price)
+        async with self._lock:
+            try:
+                # 1. Делегируем обновление стакана инфраструктуре
+                self.lob.apply_update(snapshot)
+                
+                # Если данных мало - выходим
+                if not self.lob.bids or not self.lob.asks: return
+
+                # 2. Обновляем аналитику
+                self._update_metrics()
+
+                # 3. Достаем данные для принятия решений
+                best_bid_p = self.lob.get_best("Buy")
+                best_ask_p = self.lob.get_best("Sell")
+                
+                best_bid_v = self.lob.get_volume("Buy", best_bid_p)
+                best_ask_v = self.lob.get_volume("Sell", best_ask_p)
+
+                # 4. Роутинг по машине состояний
+                if self.state == StrategyState.IDLE:
+                    await self._handle_idle(best_bid_p, best_bid_v, best_ask_p, best_ask_v)
+                
+                elif self.state == StrategyState.ORDER_PLACED:
+                    await self._handle_order_placed()
+                
+                elif self.state == StrategyState.IN_POSITION:
+                    await self._handle_in_position(best_bid_p, best_ask_p)
+                    
+            except Exception as e:
+                logger.error(f"💥 Loop Error: {e}", exc_info=True)
+
+    # --- STATE HANDLERS (Business Logic) ---
+
+    async def _handle_idle(self, bid_p, bid_v, ask_p, ask_v):
+        threshold = self.avg_vol * self.cfg.wall_ratio_threshold
+        
+        # Rate-limited logging
+        now = asyncio.get_running_loop().time()
+        if now - self._last_log_ts > 5.0:
+            logger.info(
+                f"👀 SCAN: Bg={self.avg_vol:.0f} | Thr={threshold:.0f} | "
+                f"Bid={bid_v:.0f} vs Ask={ask_v:.0f}"
+            )
+            self._last_log_ts = now
+
+        # Logic: Entry Signal
+        # Long
+        if bid_v > threshold and (bid_v * bid_p > self.cfg.min_wall_value_usdt):
+            await self._place_entry_order("Buy", bid_p, bid_p + self.tick_size)
             return
 
-        # SHORT (Ask Wall)
-        is_ask_wall = (best_ask.quantity > self.avg_ask_vol * self.cfg.wall_ratio_threshold)
-        wall_val_usdt = best_ask.quantity * best_ask.price
+        # Short
+        if ask_v > threshold and (ask_v * ask_p > self.cfg.min_wall_value_usdt):
+            await self._place_entry_order("Sell", ask_p, ask_p - self.tick_size)
 
-        if is_ask_wall and wall_val_usdt > self.cfg.min_wall_value_usdt:
-            logger.info(f"🧱 ASK WALL: {best_ask.quantity:.0f} (${wall_val_usdt:.0f}) @ {best_ask.price}")
-            entry_price = best_ask.price - (self.cfg.tick_size * self.cfg.entry_delta_ticks)
-            await self._enter_position("Sell", entry_price, wall_price=best_ask.price)
-
-    async def _enter_position(self, side: str, price: float, wall_price: float):
-        # 1. Считаем QTY от USDT
-        if self.cfg.order_amount_usdt <= 0:
-            logger.error("❌ Order Amount USDT is 0! Check config.py")
+    async def _handle_order_placed(self):
+        # 1. Валидация условия входа (Стена все еще там?)
+        if not self._check_wall_integrity():
+            vol = self.lob.get_volume(self.ctx.side, self.ctx.wall_price)
+            logger.warning(f"💨 Wall vanished! Vol={vol:.1f}. Cancelling...")
+            await self.exec.cancel_order(self.ctx.order_id)
+            self._reset_state()
             return
 
-        # Qty = $50 / 0.0411 = 1216.54
-        raw_qty = self.cfg.order_amount_usdt / price
+        # 2. Проверка исполнения (Интеграция с Execution)
+        real_pos = await self.exec.get_position()
         
-        # Округляем до лота (например, до 1) -> 1216
-        qty = self._round_to_step(raw_qty, self.cfg.lot_size)
-        
-        # Округляем цену до тика
-        price = self._round_to_step(price, self.cfg.tick_size)
+        # Если позиция набрана на 90%+
+        if (self.ctx.side == "Buy" and real_pos >= self.ctx.quantity * 0.9) or \
+           (self.ctx.side == "Sell" and real_pos <= -self.ctx.quantity * 0.9):
+             
+             logger.info(f"✅ FILLED ({self.ctx.side}). Pos: {real_pos}")
+             self.state = StrategyState.IN_POSITION
+             await self._place_take_profit()
 
-        # 2. Проверка на минимальный размер ордера (Bybit Limit ~5 USDT)
-        order_value = qty * price
-        if order_value < 5.5: # Берем с запасом
-            logger.warning(f"⚠️ Order Value ${order_value:.2f} too small (Min $5). Skipping.")
+    async def _handle_in_position(self, best_bid, best_ask):
+        # 1. Проверка фундамента сделки (Стена)
+        if not self._check_wall_integrity():
+            logger.warning("⚠️ Wall COLLAPSED! PANIC EXIT.")
+            await self._panic_exit()
             return
 
-        self.state = State.ENTRY_SENT
-        logger.info(f"🚀 ENTERING {side}: {qty} @ {price:.5f} (${order_value:.2f})")
-        
-        oid = await self.exec.place_limit_maker(side, price, qty)
-        
-        if oid:
-            self.state = State.IN_POSITION
-            self.trade = ActiveTrade(side, price, qty, wall_price, entry_oid=oid)
-            await self._place_take_profit(side, price, qty)
-        else:
-            self.state = State.IDLE
-
-    async def _place_take_profit(self, entry_side: str, entry_price: float, qty: float):
-        tp_side = "Sell" if entry_side == "Buy" else "Buy"
-        ticks = self.cfg.take_profit_ticks
-        
-        if entry_side == "Buy":
-            tp_price = entry_price + (ticks * self.cfg.tick_size)
-        else:
-            tp_price = entry_price - (ticks * self.cfg.tick_size)
-            
-        tp_price = self._round_to_step(tp_price, self.cfg.tick_size)
-        
-        tp_oid = await self.exec.place_limit_maker(tp_side, tp_price, qty)
-        if tp_oid:
-            self.trade.tp_oid = tp_oid
-            logger.info(f"🎯 TP Placed @ {tp_price}")
-
-    async def _check_exit_conditions(self, snapshot):
-        """Проверка условий выхода: Исчезновение стены или Стоп-лосс"""
-        if not self.trade: return
-
-        # 1. ПРОВЕРКА СТЕНЫ (Wall Collapse)
-        search_side = snapshot.bids if self.trade.side == "Buy" else snapshot.asks
-        
-        current_wall_vol = 0.0
-        # Ищем в топ-5 уровнях
-        for i in range(min(5, len(search_side))):
-            level = search_side[i]
-            # Сравниваем float с эпсилоном
-            if abs(level.price - self.trade.wall_price) < 1e-9:
-                current_wall_vol = level.quantity
-                break
-        
-        # Порог паники: если объем упал ниже 50% от "триггера"
-        baseline = self.avg_bid_vol if self.trade.side == "Buy" else self.avg_ask_vol
-        collapse_threshold = baseline * self.cfg.wall_ratio_threshold * 0.5
-        
-        if current_wall_vol < collapse_threshold:
-            logger.warning(f"⚠️ WALL COLLAPSED! Cur: {current_wall_vol:.1f} < {collapse_threshold:.1f}. PANIC EXIT!")
-            await self._panic_exit(reason="WallCollapse")
-            return
-
-        # 2. ВИРТУАЛЬНЫЙ СТОП-ЛОСС
-        market_price = snapshot.asks[0].price if self.trade.side == "Buy" else snapshot.bids[0].price
-        
-        pnl_ticks = (market_price - self.trade.entry_price) / self.cfg.tick_size
-        if self.trade.side == "Sell": 
-            pnl_ticks = -pnl_ticks
+        # 2. Риск-менеджмент (Stop Loss)
+        curr_price = best_bid if self.ctx.side == "Buy" else best_ask
+        pnl = (curr_price - self.ctx.entry_price) if self.ctx.side == "Buy" else (self.ctx.entry_price - curr_price)
+        pnl_ticks = pnl / self.tick_size
         
         if pnl_ticks <= -self.cfg.stop_loss_ticks:
-            logger.warning(f"🛑 STOP LOSS HIT: {pnl_ticks:.1f} ticks. PANIC EXIT!")
-            await self._panic_exit(reason="StopLoss")
+            logger.warning(f"🛑 STOP LOSS ({pnl_ticks:.1f} ticks).")
+            await self._panic_exit()
+            return
 
-    async def _panic_exit(self, reason: str):
-        """Экстренный выход по рынку"""
-        if self.state == State.EXIT_SENT:
-            return # Уже выходим
-            
-        self.state = State.EXIT_SENT
+        # 3. Проверка выхода (Take Profit)
+        real_pos = await self.exec.get_position()
+        if abs(real_pos) < self.ctx.quantity * 0.1:
+            logger.info("💰 TP EXECUTED.")
+            self._reset_state()
+
+    # --- PRIVATE HELPERS ---
+
+    def _check_wall_integrity(self) -> bool:
+        """Стена считается живой, если осталось >50% от порога входа"""
+        current_vol = self.lob.get_volume(self.ctx.side, self.ctx.wall_price)
+        threshold = self.avg_vol * self.cfg.wall_ratio_threshold * 0.5
+        return current_vol > threshold
+
+    async def _place_entry_order(self, side: str, wall_price: float, entry_price: float):
+        raw_qty = self.cfg.order_amount_usdt / entry_price
+        qty = self._round_qty(raw_qty)
+        price = self._round_price(entry_price)
+
+        if qty * price < 5.0: return # Min order filter
+
+        logger.info(f"🧱 WALL FOUND: {side} {self.lob.get_volume(side, wall_price):.0f} @ {wall_price}. Order @ {price}")
         
-        # 1. Отменяем TP, если он есть
-        if self.trade.tp_oid:
-            await self.exec.cancel_order(self.trade.tp_oid)
-            
-        # 2. Бьем по рынку
-        exit_side = "Sell" if self.trade.side == "Buy" else "Buy"
-        await self.exec.place_market_order(exit_side, self.trade.size)
+        oid = await self.exec.place_limit_maker(side, price, qty)
+        if oid:
+            self.state = StrategyState.ORDER_PLACED
+            self.ctx = TradeContext(side, wall_price, price, qty, oid)
+
+    async def _place_take_profit(self):
+        tp_ticks = self.cfg.take_profit_ticks
+        tp_side = "Sell" if self.ctx.side == "Buy" else "Buy"
         
-        logger.info(f"🏳️ POSITION CLOSED ({reason})")
+        sign = 1 if self.ctx.side == "Buy" else -1
+        tp_price = self.ctx.entry_price + (sign * tp_ticks * self.tick_size)
+        tp_price = self._round_price(tp_price)
         
-        # Сброс
-        self.trade = None
-        self.state = State.IDLE
+        logger.info(f"🎯 TP @ {tp_price}")
+        oid = await self.exec.place_limit_maker(tp_side, tp_price, self.ctx.quantity)
+        self.ctx.tp_order_id = oid
+
+    async def _panic_exit(self):
+        if self.ctx.tp_order_id:
+            await self.exec.cancel_order(self.ctx.tp_order_id)
+        
+        exit_side = "Sell" if self.ctx.side == "Buy" else "Buy"
+        await self.exec.place_market_order(exit_side, self.ctx.quantity)
+        self._reset_state()
+
+    def _reset_state(self):
+        self.state = StrategyState.IDLE
+        self.ctx = None
+
+    def _round_price(self, price: float) -> float:
+        if self.tick_size == 0: return price
+        return round(price / self.tick_size) * self.tick_size
+
+    def _round_qty(self, qty: float) -> float:
+        if self.cfg.lot_size == 0: return qty
+        step = self.cfg.lot_size
+        return math.floor(qty / step) * step

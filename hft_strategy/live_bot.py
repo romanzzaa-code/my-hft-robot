@@ -3,6 +3,7 @@ import asyncio
 import logging
 import sys
 import os
+from typing import Dict
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,13 +24,12 @@ else:
 # -----------------
 
 import hft_core 
-from hft_strategy.config import TRADING_CONFIG, DB_CONFIG # [NEW] Added DB_CONFIG
+# [UPDATED] Импортируем TARGET_COINS
+from hft_strategy.config import TRADING_CONFIG, DB_CONFIG, TARGET_COINS
 from hft_strategy.infrastructure.market_bridge import MarketBridge
 from hft_strategy.infrastructure.execution import BybitExecutionHandler
 from hft_strategy.domain.strategy_config import get_config
 from hft_strategy.strategies.adaptive_live_strategy import AdaptiveWallStrategy
-
-# [NEW] Импортируем писателя в БД
 from hft_strategy.infrastructure.db_writer import TimescaleRepository, BufferedTickWriter
 
 logging.basicConfig(
@@ -40,71 +40,94 @@ logging.basicConfig(
 logger = logging.getLogger("MAIN")
 
 async def main():
-    symbol = TRADING_CONFIG.symbol
-    logger.info(f"🤖 STARTING LIVE BOT for {symbol}")
+    # 1. Используем список монет из конфига
+    symbols = TARGET_COINS
+    logger.info(f"🤖 STARTING MULTI-BOT for: {symbols}")
     
-    cfg = get_config(symbol)
-    
-    # 1. Init Database Writer [NEW]
+    # 2. Init Database Writer
     logger.info("💾 Connecting to Database...")
     repo = TimescaleRepository(DB_CONFIG.as_dict())
     await repo.connect()
     
-    # Буфер будет сбрасывать данные в БД каждые 1000 тиков или раз в 0.5 сек
+    # Общий буфер для всех монет
     db_writer = BufferedTickWriter(repository=repo, batch_size=1000, flush_interval=0.5)
     await db_writer.start()
 
-    # 2. Init Strategy Components
+    # 3. Init Executor (Один на всех)
     api_key = os.getenv("BYBIT_API_KEY", "")
     api_secret = os.getenv("BYBIT_API_SECRET", "")
     executor = BybitExecutionHandler(api_key, api_secret, sandbox=False)
-    logger.info("📏 Fetching instrument specifications...")
-    tick_size, lot_size, min_qty = await executor.fetch_instrument_info(symbol)
-    
-    # Обновляем конфиг реальными данными
-    cfg.tick_size = tick_size
-    cfg.lot_size = lot_size
-    cfg.min_qty = min_qty
-    
-    logger.info(f"✅ Config Updated: Tick={cfg.tick_size}, Lot={cfg.lot_size}, Order=${cfg.order_amount_usdt}")
-    strategy = AdaptiveWallStrategy(executor, cfg)
-    
 
-    # 3. Init Core & Bridge
+    # 4. Init Strategies (Карта: Symbol -> Strategy)
+    strategies: Dict[str, AdaptiveWallStrategy] = {}
+    
+    logger.info("🔧 Initializing strategies for each symbol...")
+    for sym in symbols:
+        try:
+            # Получаем спецификации инструмента
+            tick_size, lot_size, min_qty = await executor.fetch_instrument_info(sym)
+            
+            # Создаем конфиг для конкретной монеты
+            cfg = get_config(sym)
+            cfg.tick_size = tick_size
+            cfg.lot_size = lot_size
+            cfg.min_qty = min_qty
+            
+            # Создаем экземпляр стратегии
+            strategies[sym] = AdaptiveWallStrategy(executor, cfg)
+            logger.info(f"✅ Armed {sym}: Tick={tick_size}, Lot={lot_size}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to init strategy for {sym}: {e}")
+            # Не падаем, если одна монета сбойнула, продолжаем с остальными
+            continue
+            
+    if not strategies:
+        logger.critical("❌ No strategies initialized! Exiting.")
+        return
+
+    # 5. Init Core & Bridge
     parser = hft_core.BybitParser()
     streamer = hft_core.ExchangeStreamer(parser)
     loop = asyncio.get_running_loop()
     bridge = MarketBridge(TRADING_CONFIG.ws_url, streamer, loop)
     
-    # 4. Start
+    # 6. Start & Subscribe
     await bridge.start()
-    logger.info("📡 Subscribing to market data...")
-    await bridge.sync_heavy_subscriptions([symbol])
+    logger.info(f"📡 Subscribing to market data for {len(strategies)} symbols...")
+    
+    # Подписываемся сразу на весь список успешных монет
+    active_symbols = list(strategies.keys())
+    await bridge.sync_heavy_subscriptions(active_symbols)
 
-    logger.info("🟢 LIVE SYSTEM ACTIVE. Trading & Recording...")
+    logger.info("🟢 LIVE SYSTEM ACTIVE. Multi-Asset Mode.")
 
     try:
         while True:
             event = await bridge.get_tick()
             
-            # [NEW] Пишем событие в базу (асинхронно, в буфер)
-            # Это очень быстрая операция, она не затормозит стратегию
+            # Пишем в базу всё подряд
             await db_writer.add_event(event)
 
-            # Передаем в стратегию
-            evt_type = getattr(event, 'type', '')
-            if evt_type == 'depth':
-                await strategy.on_depth(event)
+            # Маршрутизация событий (Dispatcher)
+            # Если событие пришло по монете, для которой есть стратегия -> передаем
+            target_strategy = strategies.get(event.symbol)
+            
+            if target_strategy:
+                evt_type = getattr(event, 'type', '')
+                if evt_type == 'depth':
+                    await target_strategy.on_depth(event)
+            # else: 
+                # Тики по неизвестным монетам просто игнорируем (или пишем в лог, если нужно)
                 
     except KeyboardInterrupt:
         logger.info("🛑 Stopping by user request...")
     except Exception as e:
         logger.critical(f"💥 CRITICAL ERROR: {e}", exc_info=True)
     finally:
-        # Graceful Shutdown [NEW]
         logger.info("💤 Shutting down services...")
         await bridge.stop()
-        await db_writer.stop() # Сброс остатков буфера на диск
+        await db_writer.stop()
         await repo.close()
         logger.info("👋 Bot stopped.")
 
