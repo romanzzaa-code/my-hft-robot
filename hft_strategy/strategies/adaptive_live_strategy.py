@@ -6,7 +6,8 @@ from enum import Enum, auto
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Union
 
-from hft_strategy.infrastructure.execution import BybitExecutionHandler
+# Зависим от абстракции
+from hft_strategy.domain.interfaces import IExecutionHandler 
 from hft_strategy.domain.strategy_config import StrategyParameters
 
 logger = logging.getLogger("ADAPTIVE_STRAT")
@@ -83,7 +84,7 @@ class TradeContext:
 
 # --- Strategy ---
 class AdaptiveWallStrategy:
-    def __init__(self, executor: BybitExecutionHandler, cfg: StrategyParameters):
+    def __init__(self, executor: IExecutionHandler, cfg: StrategyParameters):
         self.exec = executor
         self.cfg = cfg
         self.state = StrategyState.IDLE
@@ -94,20 +95,22 @@ class AdaptiveWallStrategy:
         self.tick_size = cfg.tick_size
         self.avg_vol = 0.0 
         self.initialized = False
-        self._last_log_ts = 0
         
-        # [FIX] Precision Management
+        # Debounce logic
+        self._wall_confirms = 0
+        self._required_confirms = 1
+        
         self.price_decimals = self._get_decimals(cfg.tick_size)
         self.qty_decimals = self._get_decimals(cfg.lot_size)
         
-        # Dynamic Take Profit State
         self.current_tp_pct = self.cfg.min_tp_percent 
         if self.cfg.use_dynamic_tp:
             asyncio.create_task(self._volatility_loop())
 
     # --- VOLATILITY LOGIC ---
     async def _volatility_loop(self):
-        logger.info("🌊 Volatility Watchdog Started")
+        # [CLEANUP] INFO -> DEBUG (Не спамим при старте, если монет много)
+        logger.debug(f"🌊 Volatility Watchdog Started for {self.cfg.symbol}")
         while True:
             try:
                 klines = await self.exec.fetch_ohlc(self.cfg.symbol, interval="5", limit=self.cfg.natr_period + 1)
@@ -168,7 +171,31 @@ class AdaptiveWallStrategy:
                 best_ask_v = self.lob.get_volume("Sell", best_ask_p)
 
                 if self.state == StrategyState.IDLE:
-                    await self._handle_idle(best_bid_p, best_bid_v, best_ask_p, best_ask_v)
+                    # Проверяем условия стены
+                    threshold = self.avg_vol * self.cfg.wall_ratio_threshold
+                    is_bid_wall = best_bid_v > threshold and (best_bid_v * best_bid_p > self.cfg.min_wall_value_usdt)
+                    is_ask_wall = best_ask_v > threshold and (best_ask_v * best_ask_p > self.cfg.min_wall_value_usdt)
+
+                    # [CLEANUP] Логирование сканирования только в DEBUG
+                    # Это уберет 90% спама в консоли
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            f"👀 SCAN [{self.cfg.symbol}]: Bg={self.avg_vol:.0f} | Thr={threshold:.0f} | "
+                            f"BidWall={is_bid_wall} | AskWall={is_ask_wall}"
+                        )
+
+                    if is_bid_wall or is_ask_wall:
+                        self._wall_confirms += 1
+                    else:
+                        self._wall_confirms = 0 
+
+                    if self._wall_confirms >= self._required_confirms:
+                        if is_bid_wall:
+                            await self._place_entry_order("Buy", best_bid_p, best_bid_p + self.tick_size)
+                        elif is_ask_wall:
+                            await self._place_entry_order("Sell", best_ask_p, best_ask_p - self.tick_size)
+                        self._wall_confirms = 0 
+
                 elif self.state == StrategyState.ORDER_PLACED:
                     await self._handle_order_placed()
                 elif self.state == StrategyState.IN_POSITION:
@@ -177,55 +204,83 @@ class AdaptiveWallStrategy:
             except Exception as e:
                 logger.error(f"💥 Loop Error: {e}", exc_info=True)
 
-    async def _handle_idle(self, bid_p, bid_v, ask_p, ask_v):
-        threshold = self.avg_vol * self.cfg.wall_ratio_threshold
-        now = asyncio.get_running_loop().time()
-        if now - self._last_log_ts > 10.0:
-            logger.info(
-                f"👀 SCAN [{self.cfg.symbol}]: Bg={self.avg_vol:.0f} | Thr={threshold:.0f} | "
-                f"TP={self.current_tp_pct:.2f}%"
-            )
-            self._last_log_ts = now
-
-        if bid_v > threshold and (bid_v * bid_p > self.cfg.min_wall_value_usdt):
-            await self._place_entry_order("Buy", bid_p, bid_p + self.tick_size)
-            return
-
-        if ask_v > threshold and (ask_v * ask_p > self.cfg.min_wall_value_usdt):
-            await self._place_entry_order("Sell", ask_p, ask_p - self.tick_size)
-
     async def _handle_order_placed(self):
-        if not self._check_wall_integrity():
-            await self.exec.cancel_order(self.ctx.order_id)
-            self._reset_state()
-            return
-
-        real_pos = await self.exec.get_position()
+        real_pos = await self.exec.get_position(self.cfg.symbol)
         
-        if (self.ctx.side == "Buy" and real_pos >= self.ctx.quantity * 0.9) or \
-           (self.ctx.side == "Sell" and real_pos <= -self.ctx.quantity * 0.9):
+        is_filled = False
+        if self.ctx.side == "Buy":
+            is_filled = real_pos >= self.ctx.quantity * 0.9 
+        else:
+            is_filled = real_pos <= -self.ctx.quantity * 0.9
+
+        if is_filled:
+             # [KEEP INFO] Важное событие - вход в позицию
              logger.info(f"✅ FILLED ({self.ctx.side}). Pos: {real_pos}")
              self.state = StrategyState.IN_POSITION
              await self._place_take_profit()
+             return
 
-    async def _handle_in_position(self, best_bid, best_ask):
         if not self._check_wall_integrity():
-            logger.warning("⚠️ Wall COLLAPSED! PANIC EXIT.")
-            await self._panic_exit()
+            # [CLEANUP] INFO -> DEBUG (Это рутина для HFT)
+            logger.debug("🧱 Wall collapsed. Attempting cancel...")
+            
+            await self.exec.cancel_order(self.cfg.symbol, self.ctx.order_id)
+            
+            await asyncio.sleep(0.5) 
+            real_pos_after = await self.exec.get_position(self.cfg.symbol)
+            
+            is_filled_after = False
+            if self.ctx.side == "Buy":
+                is_filled_after = real_pos_after >= self.ctx.quantity * 0.1 
+            else:
+                is_filled_after = real_pos_after <= -self.ctx.quantity * 0.1
+
+            if is_filled_after:
+                logger.warning(f"😅 Race condition caught! Filled during cancel. Pos: {real_pos_after}")
+                self.state = StrategyState.IN_POSITION
+                await self._place_take_profit()
+            else:
+                # [CLEANUP] INFO -> DEBUG
+                logger.debug("🗑️ Order cancelled/gone. Resetting state.")
+                self._reset_state()
             return
 
-        curr_price = best_bid if self.ctx.side == "Buy" else best_ask
-        pnl = (curr_price - self.ctx.entry_price) if self.ctx.side == "Buy" else (self.ctx.entry_price - curr_price)
+    async def _handle_in_position(self, best_bid, best_ask):
+        exit_price = best_bid if self.ctx.side == "Buy" else best_ask
+        pnl = (exit_price - self.ctx.entry_price) if self.ctx.side == "Buy" else (self.ctx.entry_price - exit_price)
         pnl_ticks = pnl / self.tick_size
         
         if pnl_ticks <= -self.cfg.stop_loss_ticks:
-            logger.warning(f"🛑 STOP LOSS ({pnl_ticks:.1f} ticks).")
+            # [KEEP WARNING] Это потеря денег, надо видеть
+            logger.warning(f"🛑 HARD STOP LOSS ({pnl_ticks:.1f} ticks).")
             await self._panic_exit()
             return
 
-        real_pos = await self.exec.get_position()
+        wall_broken = False
+        if self.ctx.side == "Buy":
+            if exit_price < self.ctx.wall_price: 
+                wall_broken = True
+        else:
+            if exit_price > self.ctx.wall_price: 
+                wall_broken = True
+        
+        if wall_broken:
+            # [KEEP WARNING] Пробой стены
+            logger.warning(f"🔨 WALL BROKEN/EATEN! Price: {exit_price} vs Wall: {self.ctx.wall_price}")
+            await self._panic_exit()
+            return
+
+        if not self._check_wall_integrity():
+            # [KEEP INFO] Это важный сигнал, что робот перешел в режим HOLD
+            # Но можно сделать DEBUG, если слишком часто мигает. Пока оставим INFO.
+            logger.info(f"⚠️ Wall volume gone. Price safe. HOLDING. Delta: {abs(exit_price - self.ctx.wall_price):.4f}")
+            # Мы решили НЕ выходить, если цена не пробита
+            pass 
+
+        real_pos = await self.exec.get_position(self.cfg.symbol)
         if abs(real_pos) < self.ctx.quantity * 0.1:
-            logger.info("💰 TP EXECUTED.")
+            # [KEEP INFO] Прибыль
+            logger.info("💰 TP EXECUTED (Confirmed by balance).")
             self._reset_state()
 
     # --- UTILS ---
@@ -237,20 +292,16 @@ class AdaptiveWallStrategy:
     async def _place_entry_order(self, side: str, wall_price: float, entry_price: float):
         raw_qty = self.cfg.order_amount_usdt / entry_price
         
-        # [UPDATED] Используем строгую логику округления и проверки min_qty
         qty = self._round_qty(raw_qty)
         price = self._round_price(entry_price)
         
-        # Фильтр: Минимальный объем (из лота)
-        if qty < self.cfg.min_qty:
-            return
-            
-        # Фильтр: Минимальная стоимость ($5, например)
-        if qty * price < 5.0: 
-            return
+        if qty < self.cfg.min_qty: return
+        if qty * price < 5.0: return
 
-        logger.info(f"🧱 WALL: {side} {self.lob.get_volume(side, wall_price):.0f} @ {wall_price}. Order @ {price}")
-        oid = await self.exec.place_limit_maker(side, price, qty)
+        # [KEEP INFO] Попытка входа - это важно
+        logger.info(f"🧱 WALL DETECTED: {side} {self.lob.get_volume(side, wall_price):.0f}. Order @ {price}")
+        
+        oid = await self.exec.place_limit_maker(self.cfg.symbol, side, price, qty)
         if oid:
             self.state = StrategyState.ORDER_PLACED
             self.ctx = TradeContext(side, wall_price, price, qty, oid)
@@ -269,15 +320,18 @@ class AdaptiveWallStrategy:
         tp_price = self.ctx.entry_price + (sign * tp_ticks * self.tick_size)
         tp_price = self._round_price(tp_price)
         
-        logger.info(f"🎯 TP @ {tp_price} (+{self.current_tp_pct:.2f}% / {tp_ticks} ticks)")
-        oid = await self.exec.place_limit_maker(tp_side, tp_price, self.ctx.quantity)
+        # [KEEP INFO] Выставление тейка
+        logger.info(f"🎯 TP PLACED @ {tp_price} (+{self.current_tp_pct:.2f}% / {tp_ticks} ticks)")
+        
+        oid = await self.exec.place_limit_maker(self.cfg.symbol, tp_side, tp_price, self.ctx.quantity)
         self.ctx.tp_order_id = oid
 
     async def _panic_exit(self):
         if self.ctx.tp_order_id:
-            await self.exec.cancel_order(self.ctx.tp_order_id)
+            await self.exec.cancel_order(self.cfg.symbol, self.ctx.tp_order_id)
+        
         exit_side = "Sell" if self.ctx.side == "Buy" else "Buy"
-        await self.exec.place_market_order(exit_side, self.ctx.quantity)
+        await self.exec.place_market_order(self.cfg.symbol, exit_side, self.ctx.quantity)
         self._reset_state()
 
     def _reset_state(self):
@@ -288,7 +342,6 @@ class AdaptiveWallStrategy:
         if step == 0: return 0
         step_str = f"{step:.8f}".rstrip("0")
         if "." in step_str:
-            # Убираем точку в конце "1."
             val = step_str.split(".")[1]
             return len(val) if val else 0
         return 0
@@ -300,22 +353,10 @@ class AdaptiveWallStrategy:
         return round(clean_price, self.price_decimals)
 
     def _round_qty(self, qty: float) -> Union[float, int]:
-        """
-        Корректное округление QTY.
-        1. Формула: floor(qty / step) * step
-        2. Если шаг целый (decimals=0), возвращаем int (напр. 6 вместо 6.0)
-        """
         if self.cfg.lot_size == 0: return qty
-        
-        # 1. Floor round (по спецификации API)
         steps = math.floor(qty / self.cfg.lot_size)
         clean_qty = steps * self.cfg.lot_size
-        
-        # 2. Убираем "шум" float (напр. 6.000000001 -> 6.0)
         clean_qty = round(clean_qty, self.qty_decimals)
-        
-        # 3. Приведение к int для целочисленных шагов
         if self.qty_decimals == 0:
             return int(clean_qty)
-            
         return clean_qty
