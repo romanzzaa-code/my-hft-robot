@@ -8,7 +8,7 @@ from typing import List
 # ==========================================
 
 # 1. Список монет для торговли
-TARGET_COINS = ["NEARUSDT", "STRKUSDT", "ARBUSDT", "GALAUSDT", "RUNEUSDT"]
+TARGET_COINS = ["LIGHTUSDT", "RIVERUSDT", "ALCHUSDT", "STRKUSDT"]
 
 # 2. Размер ордера в $ (на каждую монету)
 INVESTMENT_USDT = 20.0   

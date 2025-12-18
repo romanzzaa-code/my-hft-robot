@@ -59,8 +59,44 @@ class BybitExecutionHandler:
         except Exception as e:
             logger.error(f"❌ Failed to fetch instrument info: {e}")
             raise # Это критично, без этого нельзя запускаться
+    
 
-        
+    async def fetch_ohlc(self, symbol: str, interval: str = "5", limit: int = 20):
+        """
+        Запрашивает исторические свечи для расчета волатильности.
+        interval: "1", "3", "5", "15", "60"...
+        """
+        if self.read_only and not self.client:
+            return [] # Mock data or empty
+
+        try:
+            loop = asyncio.get_running_loop()
+            resp = await loop.run_in_executor(None, lambda: self.client.get_kline(
+                category=self.category,
+                symbol=symbol,
+                interval=interval,
+                limit=limit
+            ))
+            
+            if resp['retCode'] != 0:
+                return []
+                
+            # Bybit возвращает: [startTime, open, high, low, close, volume, turnover]
+            # Нам нужны High, Low, Close (float)
+            klines = []
+            for k in resp['result']['list']:
+                # list идет от новых к старым, нам это ок
+                high = float(k[2])
+                low = float(k[3])
+                close = float(k[4])
+                klines.append({"h": high, "l": low, "c": close})
+            
+            return klines
+
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch OHLC: {e}")
+            return []
+
     async def place_market_order(self, side: str, qty: float) -> Optional[str]:
         """
         Отправляет рыночный ордер (Taker).

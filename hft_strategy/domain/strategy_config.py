@@ -1,49 +1,35 @@
 # hft_strategy/domain/strategy_config.py
 from dataclasses import dataclass
-from typing import Dict
-
-# Импортируем твои настройки из главного конфига
 from hft_strategy.config import INVESTMENT_USDT
 
 @dataclass
 class StrategyParameters:
     symbol: str
-    
-    # Деньги берем из глобальной настройки
     order_amount_usdt: float = INVESTMENT_USDT
-    
-    # Эти поля заполнятся сами при старте (через fetch_instrument_info)
     tick_size: float = 0.0
     lot_size: float = 0.0
     min_qty: float = 0.0
     
-    # --- НАСТРОЙКИ "МОЗГА" (ДЕФОЛТНЫЕ ДЛЯ ВСЕХ МОНЕТ) ---
-    # Можно вынести и их в config.py, но пока оставим здесь как "заводские настройки"
-    
-    # Стена = x15 от среднего
-    wall_ratio_threshold: float = 15.0
-    
-    # Фильтр мусора (стена должна стоить хотя бы $50k)
-    min_wall_value_usdt: float = 50000.0
-    
-    # Скорость адаптации (EMA)
+    # --- ЛОГИКА СТЕН ---
+    wall_ratio_threshold: float = 2.0
+    min_wall_value_usdt: float = 10000.0
     vol_ema_alpha: float = 0.01 
     
-    # Риск-менеджмент (в тиках)
-    # 1 тик на вход, 15 на прибыль, 30 на стоп
+    # --- РИСК-МЕНЕДЖМЕНТ ---
     entry_delta_ticks: int = 1
-    take_profit_ticks: int = 15
     stop_loss_ticks: int = 30
-
-
-# [CHANGED] Больше никаких ручных блоков KNOWN_CONFIGS!
-# Функция просто генерирует конфиг для ЛЮБОЙ монеты, которую ты дал.
+    
+    # [NEW] ДИНАМИЧЕСКИЙ ТЕЙК
+    use_dynamic_tp: bool = True     # Включить авто-тейк?
+    natr_period: int = 20           # Период ATR (свечи 5 мин)
+    tp_natr_multiplier: float = 0.5 # 50% от NATR
+    min_tp_percent: float = 0.2     # Пол (не меньше 0.2%)
+    
+    # Если use_dynamic_tp = False, используется это значение:
+    fixed_tp_ticks: int = 15 
 
 def get_config(symbol: str) -> StrategyParameters:
-    """
-    Генерирует стратегию для любой монеты на лету.
-    """
     return StrategyParameters(
         symbol=symbol.upper(),
-        order_amount_usdt=INVESTMENT_USDT # <--- Берет твои $50 (или сколько ты поставил)
+        order_amount_usdt=INVESTMENT_USDT
     )
