@@ -8,7 +8,7 @@ from typing import List
 # ==========================================
 
 # 1. Список монет для торговли
-TARGET_COINS = ["ALCHUSDT", "STRKUSDT", "HMSTRUSDT", "RIVERUSDT"]
+TARGET_COINS = ["ALCHUSDT", "RAVEUSDT", "HMSTRUSDT", "HUSDT", "AKEUSDT", "AAVEUSDT"]
 
 # 2. Размер ордера в $ (на каждую монету)
 INVESTMENT_USDT = 20.0   
@@ -51,5 +51,5 @@ DB_CONFIG = DatabaseConfig(
 
 TRADING_CONFIG = TradingConfig(
     # Берем первую монету как дефолтную, чтобы инициализация не падала
-    symbol=TARGET_COINS[0] if TARGET_COINS else "BTCUSDT"
+    symbol=TARGET_COINS[0] if TARGET_COINS else "BTCUSDT", "ETHUSDT"
 )

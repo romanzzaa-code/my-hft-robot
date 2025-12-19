@@ -98,7 +98,7 @@ class AdaptiveWallStrategy:
         
         # Debounce logic
         self._wall_confirms = 0
-        self._required_confirms = 1
+        self._required_confirms = 3
         
         self.price_decimals = self._get_decimals(cfg.tick_size)
         self.qty_decimals = self._get_decimals(cfg.lot_size)
@@ -246,16 +246,27 @@ class AdaptiveWallStrategy:
             return
 
     async def _handle_in_position(self, best_bid, best_ask):
+        # Определяем цену выхода (худшую для нас)
         exit_price = best_bid if self.ctx.side == "Buy" else best_ask
-        pnl = (exit_price - self.ctx.entry_price) if self.ctx.side == "Buy" else (self.ctx.entry_price - exit_price)
-        pnl_ticks = pnl / self.tick_size
         
+        # 1. PnL Check (Жесткий Стоп)
+        # Считаем разницу цен
+        delta = (exit_price - self.ctx.entry_price) if self.ctx.side == "Buy" else (self.ctx.entry_price - exit_price)
+        # Переводим в тики
+        pnl_ticks = delta / self.tick_size
+        
+        # [DEBUG LOG] Если убыток уже ощутимый (больше 10 тиков), пишем в лог, чтобы ты видел
+        if pnl_ticks < -10:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"📉 PnL: {pnl_ticks:.1f} ticks (Stop @ {-self.cfg.stop_loss_ticks}) | Price: {exit_price}")
+
+        # Проверка условия Стоп-Лосса
         if pnl_ticks <= -self.cfg.stop_loss_ticks:
-            # [KEEP WARNING] Это потеря денег, надо видеть
-            logger.warning(f"🛑 HARD STOP LOSS ({pnl_ticks:.1f} ticks).")
+            logger.warning(f"🛑 STOP LOSS HIT: {pnl_ticks:.1f} ticks (Price {exit_price} vs Entry {self.ctx.entry_price})")
             await self._panic_exit()
             return
 
+        # 2. Логика "Разъедания" (Breakout)
         wall_broken = False
         if self.ctx.side == "Buy":
             if exit_price < self.ctx.wall_price: 
@@ -265,21 +276,21 @@ class AdaptiveWallStrategy:
                 wall_broken = True
         
         if wall_broken:
-            # [KEEP WARNING] Пробой стены
-            logger.warning(f"🔨 WALL BROKEN/EATEN! Price: {exit_price} vs Wall: {self.ctx.wall_price}")
+            logger.warning(f"🔨 WALL BROKEN! Price: {exit_price} breached Wall: {self.ctx.wall_price}")
             await self._panic_exit()
             return
 
+        # 3. Проверка целостности стены (Снятие)
         if not self._check_wall_integrity():
-            # [KEEP INFO] Это важный сигнал, что робот перешел в режим HOLD
-            # Но можно сделать DEBUG, если слишком часто мигает. Пока оставим INFO.
-            logger.info(f"⚠️ Wall volume gone. Price safe. HOLDING. Delta: {abs(exit_price - self.ctx.wall_price):.4f}")
-            # Мы решили НЕ выходить, если цена не пробита
+            # Если стены нет, но цена еще держится -> просто информируем (HOLD)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"⚠️ Wall volume gone. Holding. Delta from wall: {abs(exit_price - self.ctx.wall_price):.4f}")
             pass 
 
+        # 4. Проверка Тейка по балансу
+        # Делаем это реже или оставляем как есть, это надежный метод
         real_pos = await self.exec.get_position(self.cfg.symbol)
         if abs(real_pos) < self.ctx.quantity * 0.1:
-            # [KEEP INFO] Прибыль
             logger.info("💰 TP EXECUTED (Confirmed by balance).")
             self._reset_state()
 
@@ -326,13 +337,30 @@ class AdaptiveWallStrategy:
         oid = await self.exec.place_limit_maker(self.cfg.symbol, tp_side, tp_price, self.ctx.quantity)
         self.ctx.tp_order_id = oid
 
-    async def _panic_exit(self):
+    async def _panic_exit(self) -> bool:
+        """
+        Пытается закрыть позицию любой ценой.
+        Возвращает True, если ордер отправлен успешно.
+        """
+        # 1. Снимаем Тейк (если есть)
         if self.ctx.tp_order_id:
             await self.exec.cancel_order(self.cfg.symbol, self.ctx.tp_order_id)
+            self.ctx.tp_order_id = None # Забываем ID, чтобы не отменять дважды
         
         exit_side = "Sell" if self.ctx.side == "Buy" else "Buy"
-        await self.exec.place_market_order(self.cfg.symbol, exit_side, self.ctx.quantity)
-        self._reset_state()
+        
+        # 2. Бьем по рынку
+        logger.warning(f"🚨 EXECUTING PANIC EXIT ({exit_side} {self.ctx.quantity})")
+        oid = await self.exec.place_market_order(self.cfg.symbol, exit_side, self.ctx.quantity)
+        
+        if oid:
+            logger.info(f"🏳️ Panic Order Placed: {oid}. Resetting state.")
+            self._reset_state()
+            return True
+        else:
+            logger.error("❌ PANIC EXIT FAILED! API Error. Will retry next tick.")
+            # НЕ сбрасываем стейт! Робот останется в IN_POSITION и попробует снова через 10мс.
+            return False
 
     def _reset_state(self):
         self.state = StrategyState.IDLE

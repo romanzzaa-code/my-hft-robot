@@ -136,7 +136,12 @@ class BybitExecutionHandler:
             ))
             logger.info(f"🗑️ CANCELLED: {order_id} on {symbol}")
         except Exception as e:
-            logger.error(f"❌ Cancel Failed: {e}")
+            # [FIX] Если ошибка "Order not exists" (110001) - это не Error, это Info
+            str_e = str(e)
+            if "110001" in str_e or "Order not exists" in str_e:
+                logger.info(f"ℹ️ Cancel skipped (Order gone): {order_id}")
+            else:
+                logger.error(f"❌ Cancel Failed: {e}")
 
     # [FIX] Добавлен аргумент symbol
     async def get_position(self, symbol: str) -> float:
