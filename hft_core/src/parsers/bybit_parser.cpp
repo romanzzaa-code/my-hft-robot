@@ -3,6 +3,7 @@
 #include <iostream>
 #include <charconv>
 #include <chrono>
+#include "../../include/entities/execution_data.hpp"
 
 // Вспомогательная функция (оставь как есть, если она уже была)
 static double extract_double(simdjson::ondemand::value val) {
@@ -33,7 +34,8 @@ ParseResultType BybitParser::parse(
     const std::string& payload, 
     TickData& out_tick, 
     OrderBookSnapshot& out_depth,
-    TickerData& out_ticker // <--- Новый аргумент
+    TickerData& out_ticker,
+    ExecutionData& out_exec // <--- Новый аргумент
 ) {
     simdjson::padded_string json_data(payload);
     
@@ -45,7 +47,44 @@ ParseResultType BybitParser::parse(
         if (obj["topic"].get_string().get(topic_sv)) {
             return ParseResultType::None;
         }
+        
+ // --- 1. EXECUTIONS (НОВАЯ ЛОГИКА) ---
+        if (topic_sv.find("execution") != std::string_view::npos) {
+            simdjson::ondemand::array data_arr;
+            if (!obj["data"].get(data_arr)) {
+                for (auto exec_val : data_arr) {
+                    auto exec_obj = exec_val.get_object();
+                    
+                    // Извлекаем данные
+                    std::string_view sv;
+                    if (!exec_obj["symbol"].get_string().get(sv)) out_exec.symbol = std::string(sv);
+                    if (!exec_obj["orderId"].get_string().get(sv)) out_exec.order_id = std::string(sv);
+                    if (!exec_obj["side"].get_string().get(sv)) out_exec.side = std::string(sv);
+                    
+                    // Цены и объемы
+                    if (auto f = exec_obj["execPrice"]; !f.error()) out_exec.exec_price = extract_double(f.value());
+                    if (auto f = exec_obj["execQty"]; !f.error()) out_exec.exec_qty = extract_double(f.value());
+                    
+                    // Maker/Taker
+                    if (auto f = exec_obj["isMaker"]; !f.error()) { 
+                        bool val; 
+                        if (!f.value().get_bool().get(val)) out_exec.is_maker = val; 
+                    }
 
+                    // Время
+                    int64_t ts = 0;
+                    if (auto f = exec_obj["execTime"]; !f.error()) {
+                         // В execution топике timestamp часто строка, но simdjson умеет конвертировать,
+                         // если это число. Если строка - используем extract_double и кастуем.
+                         // Для надежности:
+                         out_exec.timestamp = (long long)extract_double(f.value());
+                    }
+
+                    return ParseResultType::Execution; 
+                }
+            }
+            return ParseResultType::None;
+        }
         // ==========================================
         // 1. ЛОГИКА ТИКЕРОВ (НОВАЯ)
         // ==========================================

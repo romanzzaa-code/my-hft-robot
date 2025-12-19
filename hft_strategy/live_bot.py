@@ -18,13 +18,11 @@ build_path_release = os.path.join(project_root, "hft_core", "build", "Release")
 if os.path.exists(build_path_release):
     if build_path_release not in sys.path:
         sys.path.insert(0, build_path_release)
-        print(f"🔌 Loaded C++ Core from: {build_path_release}")
 else:
     print(f"⚠️ WARNING: Build path not found: {build_path_release}")
 # -----------------
 
 import hft_core 
-# [UPDATED] Импортируем TARGET_COINS
 from hft_strategy.config import TRADING_CONFIG, DB_CONFIG, TARGET_COINS
 from hft_strategy.infrastructure.market_bridge import MarketBridge
 from hft_strategy.infrastructure.execution import BybitExecutionHandler
@@ -40,101 +38,108 @@ logging.basicConfig(
 logger = logging.getLogger("MAIN")
 
 async def main():
-    # 1. Используем список монет из конфига
     symbols = TARGET_COINS
-    logger.info(f"🤖 STARTING MULTI-BOT for: {symbols}")
+    logger.info(f"🤖 STARTING HFT ENGINE | Assets: {len(symbols)}")
     
-    # 2. Init Database Writer
+    # 1. DB & Execution
     logger.info("💾 Connecting to Database...")
     repo = TimescaleRepository(DB_CONFIG.as_dict())
     await repo.connect()
-    
-    # Общий буфер для всех монет
-    db_writer = BufferedTickWriter(repository=repo, batch_size=1000, flush_interval=0.5)
+    db_writer = BufferedTickWriter(repository=repo, batch_size=1000)
     await db_writer.start()
 
-    # 3. Init Executor (Один на всех)
     api_key = os.getenv("BYBIT_API_KEY", "")
     api_secret = os.getenv("BYBIT_API_SECRET", "")
+    if not api_key:
+        logger.warning("⚠️ Running in ANONYMOUS mode (Public Data Only)")
+
     executor = BybitExecutionHandler(api_key, api_secret, sandbox=False)
 
-    # 4. Init Strategies (Карта: Symbol -> Strategy)
+    # 2. Init Strategies
     strategies: Dict[str, AdaptiveWallStrategy] = {}
+    logger.info("🔧 Arming strategies...")
     
-    logger.info("🔧 Initializing strategies for each symbol...")
     for sym in symbols:
         try:
-            # Получаем спецификации инструмента
             tick_size, lot_size, min_qty = await executor.fetch_instrument_info(sym)
-            
-            # Создаем конфиг для конкретной монеты
             cfg = get_config(sym)
             cfg.tick_size = tick_size
             cfg.lot_size = lot_size
             cfg.min_qty = min_qty
             
-            # Создаем экземпляр стратегии
             strategies[sym] = AdaptiveWallStrategy(executor, cfg)
-            logger.info(f"✅ Armed {sym}: Tick={tick_size}, Lot={lot_size}")
-            
+            logger.info(f"   ✅ {sym} READY")
         except Exception as e:
-            logger.error(f"❌ Failed to init strategy for {sym}: {e}")
-            # Не падаем, если одна монета сбойнула, продолжаем с остальными
-            continue
-            
+            logger.error(f"   ❌ {sym} Failed: {e}")
+
     if not strategies:
-        logger.critical("❌ No strategies initialized! Exiting.")
         return
 
-    # 5. Init Core & Bridge
-    parser = hft_core.BybitParser()
-    streamer = hft_core.ExchangeStreamer(parser)
+    # 3. CORE: Shared Queue & Dual Streamers
+    # Создаем одну очередь на всех
+    shared_queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
-    bridge = MarketBridge(TRADING_CONFIG.ws_url, streamer, loop)
-    
-    # 6. Start & Subscribe
-    await bridge.start()
-    logger.info(f"📡 Subscribing to market data for {len(strategies)} symbols...")
-    
-    # Подписываемся сразу на весь список успешных монет
-    active_symbols = list(strategies.keys())
-    await bridge.sync_heavy_subscriptions(active_symbols)
 
-    logger.info("🟢 LIVE SYSTEM ACTIVE. Multi-Asset Mode.")
+    # --- PUBLIC STREAM (Market Data) ---
+    pub_parser = hft_core.BybitParser()
+    pub_streamer = hft_core.ExchangeStreamer(pub_parser)
+    public_bridge = MarketBridge(TRADING_CONFIG.ws_url, pub_streamer, loop, queue=shared_queue)
+
+    # --- PRIVATE STREAM (Executions) ---
+    priv_bridge = None
+    if api_key:
+        priv_parser = hft_core.BybitParser()
+        priv_streamer = hft_core.ExchangeStreamer(priv_parser)
+        # Используем URL из конфига (wss://stream.bybit.com/v5/private)
+        priv_bridge = MarketBridge(TRADING_CONFIG.private_ws_url, priv_streamer, loop, queue=shared_queue)
+
+    # 4. Start Engines
+    await public_bridge.start()
+    
+    # Подписка на публичные данные
+    await public_bridge.sync_heavy_subscriptions(list(strategies.keys()))
+
+    if priv_bridge:
+        await priv_bridge.start()
+        # Аутентификация и подписка на исполнения
+        priv_bridge.authenticate(api_key, api_secret)
+        priv_bridge.subscribe_executions()
+
+    logger.info("🚀 SYSTEM LIVE. Waiting for events...")
 
     try:
         while True:
-            event = await bridge.get_tick()
+            # Читаем из общей очереди. Тут будут и Trades, и Depth, и Executions
+            event = await shared_queue.get()
             
-            # Пишем в базу всё подряд
-            await db_writer.add_event(event)
+            # 1. Логирование в БД (кроме приватных событий, если не нужно)
+            evt_type = getattr(event, 'type', 'unknown')
+            if evt_type in ['trade', 'depth']:
+                await db_writer.add_event(event)
 
-            # Маршрутизация событий (Dispatcher)
-            # Если событие пришло по монете, для которой есть стратегия -> передаем
-            target_strategy = strategies.get(event.symbol)
-            
-            if target_strategy:
-                evt_type = getattr(event, 'type', '')
+            # 2. Маршрутизация
+            target_strat = strategies.get(event.symbol)
+            if target_strat:
                 if evt_type == 'depth':
-                    await target_strategy.on_depth(event)
-            # else: 
-                # Тики по неизвестным монетам просто игнорируем (или пишем в лог, если нужно)
+                    await target_strat.on_depth(event)
                 
+                # 🔥 ГЛАВНОЕ ИЗМЕНЕНИЕ 🔥
+                elif evt_type == 'execution':
+                    # Передаем управление стратегии мгновенно
+                    await target_strat.on_execution(event)
+
     except KeyboardInterrupt:
-        logger.info("🛑 Stopping by user request...")
+        logger.info("🛑 Stopping...")
     except Exception as e:
-        logger.critical(f"💥 CRITICAL ERROR: {e}", exc_info=True)
+        logger.critical(f"💥 CRASH: {e}", exc_info=True)
     finally:
-        logger.info("💤 Shutting down services...")
-        await bridge.stop()
+        await public_bridge.stop()
+        if priv_bridge:
+            await priv_bridge.stop()
         await db_writer.stop()
         await repo.close()
-        logger.info("👋 Bot stopped.")
 
 if __name__ == "__main__":
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    asyncio.run(main())

@@ -8,7 +8,7 @@ from typing import List
 # ==========================================
 
 # 1. Список монет для торговли
-TARGET_COINS = ["ALCHUSDT", "RAVEUSDT", "HMSTRUSDT", "HUSDT", "AKEUSDT", "AAVEUSDT"]
+TARGET_COINS = ["ALCHUSDT", "RAVEUSDT", "HMSTRUSDT", "LIGHTUSDT", "JELLYJELLYUSDT", "BEATUSDT"]
 
 # 2. Размер ордера в $ (на каждую монету)
 INVESTMENT_USDT = 20.0   
@@ -36,10 +36,10 @@ class DatabaseConfig:
 
 @dataclass
 class TradingConfig:
-    # Символ здесь больше не важен, так как мы берем список TARGET_COINS
-    # Но оставим поле, чтобы не ломать старый код, если он где-то используется
+
     symbol: str 
     ws_url: str = "wss://stream.bybit.com/v5/public/linear"
+    private_ws_url: str = "wss://stream.bybit.com/v5/private"
 
 # Автоматическая сборка конфигов
 DB_CONFIG = DatabaseConfig(
@@ -51,5 +51,5 @@ DB_CONFIG = DatabaseConfig(
 
 TRADING_CONFIG = TradingConfig(
     # Берем первую монету как дефолтную, чтобы инициализация не падала
-    symbol=TARGET_COINS[0] if TARGET_COINS else "BTCUSDT", "ETHUSDT"
+    symbol=TARGET_COINS[0] if TARGET_COINS else "BTCUSDT"
 )

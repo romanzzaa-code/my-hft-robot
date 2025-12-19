@@ -9,7 +9,8 @@ public:
         const std::string& payload, 
         TickData& out_tick, 
         OrderBookSnapshot& out_depth,
-        TickerData& out_ticker // <--- Добавили
+        TickerData& out_ticker,
+        ExecutionData& out_exec // <--- Добавили
     ) override;
 
 private:

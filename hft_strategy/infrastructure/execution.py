@@ -50,28 +50,59 @@ class BybitExecutionHandler:
             logger.error(f"❌ Failed to fetch instrument info: {e}")
             raise 
 
+    # ... (внутри класса BybitExecutionHandler)
+
     async def fetch_ohlc(self, symbol: str, interval: str = "5", limit: int = 20) -> List[Dict]:
-        # ... (код без изменений)
-        if self.read_only: return []
-        try:
-            loop = asyncio.get_running_loop()
-            resp = await loop.run_in_executor(None, lambda: self.client.get_kline(
-                category=self.category,
-                symbol=symbol,
-                interval=interval,
-                limit=limit
-            ))
-            if resp['retCode'] != 0: return []
-            klines = []
-            for k in resp['result']['list']:
-                high = float(k[2])
-                low = float(k[3])
-                close = float(k[4])
-                klines.append({"h": high, "l": low, "c": close})
-            return klines
-        except Exception as e:
-            logger.error(f"❌ Failed to fetch OHLC: {e}")
+        if self.read_only: 
             return []
+            
+        # Попыток запроса (1 основной + 2 ретрая)
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                loop = asyncio.get_running_loop()
+                
+                # Выполняем блокирующий запрос в отдельном потоке
+                resp = await loop.run_in_executor(None, lambda: self.client.get_kline(
+                    category=self.category,
+                    symbol=symbol,
+                    interval=interval,
+                    limit=limit
+                ))
+                
+                if resp['retCode'] != 0:
+                    # Логическая ошибка API (не сеть) — ретраить нет смысла, если это не Rate Limit
+                    # Но для простоты вернем пустоту
+                    logger.warning(f"⚠️ OHLC Error {symbol}: {resp.get('retMsg')}")
+                    return []
+
+                klines = []
+                for k in resp['result']['list']:
+                    high = float(k[2])
+                    low = float(k[3])
+                    close = float(k[4])
+                    klines.append({"h": high, "l": low, "c": close})
+                
+                return klines
+
+            except Exception as e:
+                # Проверяем, является ли ошибка сетевой (Connection aborted, RemoteDisconnected, SSL Error)
+                err_msg = str(e)
+                is_network_error = "Connection" in err_msg or "Disconnected" in err_msg or "Reset" in err_msg
+                
+                if is_network_error and attempt < max_retries - 1:
+                    # Экспоненциальная задержка: 0.2с, 0.4с
+                    sleep_time = 0.2 * (attempt + 1)
+                    # logger.debug(f"🔄 Retry fetch_ohlc ({attempt+1}/{max_retries}) due to: {e}")
+                    await asyncio.sleep(sleep_time)
+                    continue
+                
+                # Если попытки кончились или ошибка критическая — логируем
+                if attempt == max_retries - 1:
+                    logger.error(f"❌ Failed to fetch OHLC after {max_retries} attempts: {e}")
+                    
+        return []
 
     # [FIX] Добавлен аргумент symbol
     async def place_market_order(self, symbol: str, side: str, qty: float) -> Optional[str]:

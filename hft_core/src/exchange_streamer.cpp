@@ -15,6 +15,10 @@ ExchangeStreamer::~ExchangeStreamer() {
 }
 
 // ... старые сеттеры ...
+void ExchangeStreamer::set_execution_callback(std::function<void(const ExecutionData&)> cb) {
+    execution_callback = cb;
+}
+
 void ExchangeStreamer::set_tick_callback(std::function<void(const TickData&)> cb) {
     tick_callback = cb;
 }
@@ -38,11 +42,12 @@ void ExchangeStreamer::connect(std::string url) {
             // Создаем буферы для всех типов данных
             TickData temp_tick;
             OrderBookSnapshot temp_depth;
-            TickerData temp_ticker; // <--- Новый буфер
+            TickerData temp_ticker;
+            ExecutionData temp_exec;
             
             if (parser) {
-                // Передаем все три буфера в парсер
-                ParseResultType result = parser->parse(msg->str, temp_tick, temp_depth, temp_ticker);
+                // Передаем все четыре буфера в парсер
+                ParseResultType result = parser->parse(msg->str, temp_tick, temp_depth, temp_ticker, temp_exec);
                 
                 // Маршрутизация на основе результата
                 if (result == ParseResultType::Trade) {
@@ -53,6 +58,9 @@ void ExchangeStreamer::connect(std::string url) {
                 }
                 else if (result == ParseResultType::Ticker) { // <--- Новая ветка
                     if (ticker_callback) ticker_callback(temp_ticker);
+                }
+                else if (result == ParseResultType::Execution) { // <--- Новая ветка
+                    if (execution_callback) execution_callback(temp_exec);
                 }
             }
         }
