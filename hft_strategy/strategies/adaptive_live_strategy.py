@@ -144,32 +144,32 @@ class AdaptiveWallStrategy:
             await asyncio.sleep(60)
 
     # --- 2. EXECUTION HANDLER (EVENT DRIVEN) ---
+    # --- 2. EXECUTION HANDLER (EVENT DRIVEN) ---
     async def on_execution(self, event):
         """
-        [NEW] Реактивный вход. Вызывается C++ ядром мгновенно при исполнении.
+        [NEW] Реактивный вход и выход.
         """
-        # Блокировка нужна, чтобы не конфликтовать с on_depth
         async with self._lock:
-            # 1. Валидация
-            if self.state != StrategyState.ORDER_PLACED or not self.ctx:
-                return
-            
-            # Игнорируем чужие ордера (например, от ручной торговли или старых сессий)
-            if event.order_id != self.ctx.order_id:
+            if not self.ctx:
                 return
 
-            logger.info(f"⚡ EXECUTION: {event.side} {event.exec_qty} @ {event.exec_price} (Maker: {event.is_maker})")
+            # СЦЕНАРИЙ 1: Исполнение ВХОДА (Entry)
+            if event.order_id == self.ctx.order_id:
+                if self.state == StrategyState.ORDER_PLACED:
+                    logger.info(f"⚡ ENTRY FILLED: {event.side} {event.exec_qty} @ {event.exec_price}")
+                    self.state = StrategyState.IN_POSITION
+                    self.ctx.entry_price = event.exec_price
+                    await self._place_take_profit()
+                return
 
-            # 2. Переход состояния
-            # В HFT считаем первый филл сигналом к бою.
-            self.state = StrategyState.IN_POSITION
-            
-            # Уточняем цену входа по факту (важно для точности PnL)
-            self.ctx.entry_price = event.exec_price
-            
-            # 3. Выставление Тейка
-            # Делаем это максимально быстро, не отпуская лок
-            await self._place_take_profit()
+            # СЦЕНАРИЙ 2: Исполнение ТЕЙКА (TP)
+            # [FIX] Теперь мы ловим и этот ID
+            if self.ctx.tp_order_id and event.order_id == self.ctx.tp_order_id:
+                logger.info(f"💰 TP FILLED: {event.side} {event.exec_qty} @ {event.exec_price}. Trade Closed.")
+                self._reset_state()
+                return
+
+            # Если пришел какой-то левый ID (например, старый ордер), игнорируем
 
     # --- 3. MARKET DATA HANDLER ---
     async def on_depth(self, snapshot):
@@ -240,19 +240,80 @@ class AdaptiveWallStrategy:
 
     async def _logic_order_placed(self):
         """
-        Мы ждем исполнения. Polling убран!
-        Здесь мы только проверяем, не исчезла ли стена.
+        Логика ожидания входа.
+        Здесь мы следим за целостностью стены.
         """
-        # Если стена исчезла, пока мы стояли в очереди -> отмена
+        # Если стена исчезла, пока мы стояли в очереди -> попытка отмены
         if not self._check_wall_integrity():
-            logger.debug("🧱 Wall collapsed while waiting. Cancelling...")
-            await self._cancel_and_reset()
-            return
+            logger.debug("🧱 Wall collapsed. Initiating cancel sequence...")
+            
+            # 1. Отправляем отмену
+            await self.exec.cancel_order(self.cfg.symbol, self.ctx.order_id)
+            
+            # 2. [CRITICAL FIX] Race Condition Protection
+            # Нельзя просто так взять и сделать reset_state.
+            # Ордер мог исполниться в момент отмены.
+            
+            # Небольшая пауза, чтобы матчинг биржи успел обновить баланс/вернуть ошибку
+            # Это не polling, это safety wait перед принятием решения о судьбе депозита.
+            await asyncio.sleep(0.2)
+            
+            # 3. Проверка Истины (Single Source of Truth)
+            # Спрашиваем у биржи: "Мы в позиции?"
+            real_pos = await self.exec.get_position(self.cfg.symbol)
+            
+            # Проверяем, совпадает ли реальная позиция с нашим ожиданием
+            is_accidentally_filled = False
+            
+            if self.ctx.side == "Buy":
+                # Если мы хотели купить 100, а у нас есть > 10 (учитываем частичное исполнение)
+                if real_pos >= self.ctx.quantity * 0.1: 
+                    is_accidentally_filled = True
+            else:
+                if real_pos <= -self.ctx.quantity * 0.1:
+                    is_accidentally_filled = True
 
+            if is_accidentally_filled:
+                logger.warning(f"😱 GHOST FILL DETECTED! Cancel failed, we are IN POSITION: {real_pos}")
+                
+                self.state = StrategyState.IN_POSITION
+                
+                # На всякий случай обновляем цену входа (если она была 0, берем текущую рыночную как ориентир)
+                # или оставляем лимитную.
+                
+                # Срочно ставим Тейк, если его еще нет
+                if not self.ctx.tp_order_id:
+                    await self._place_take_profit()
+                    
+            else:
+                # Фух, пронесло. Действительно вышли.
+                logger.info("✅ Order cancelled cleanly. Resetting state.")
+                self._reset_state()
+            
+            return
+        
         # Также можно добавить таймаут (если ордер висит > 10 сек)
-        if time.time() - self.ctx.placed_ts > 10.0:
+        if time.time() - self.ctx.placed_ts > 15.0:
              logger.debug("⏳ Order timed out. Cancelling...")
              await self._cancel_and_reset()
+
+
+    async def _safe_cancel_and_reset(self):
+        await self.exec.cancel_order(self.cfg.symbol, self.ctx.order_id)
+        await asyncio.sleep(0.2)
+        
+        real_pos = await self.exec.get_position(self.cfg.symbol)
+        
+        # Упрощенная проверка "Есть ли позиция в нашу сторону?"
+        has_pos = (self.ctx.side == "Buy" and real_pos > 0) or (self.ctx.side == "Sell" and real_pos < 0)
+        
+        if has_pos:
+            logger.warning(f"⚠️ Order filled during cancel sequence. Transitioning to IN_POSITION.")
+            self.state = StrategyState.IN_POSITION
+            await self._place_take_profit()
+        else:
+            self._reset_state()
+
 
     async def _logic_in_position(self, best_bid, best_ask):
         """Ведение позиции (Stop Loss, Breakout)"""

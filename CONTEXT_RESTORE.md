@@ -650,3 +650,67 @@ hft_strategy/
 │   └── adaptive_live_strategy.py        (Refactored: on_execution logic)
 ├── live_bot.py                          (Updated: Dual Streamer Setup)
 └── config.py                            (Updated: Private WS URL)
+
+# 🔥 HFT Robot Project Context (Restore Point)
+**Date:** 20.12.2025
+**Role:** Lead Quantitative Developer (Code Critic Persona)
+**Status:** Phase 4.1 Active (Production Hardening & Race Condition Fixes)
+
+## 🎯 Цель проекта
+Создание самообучающегося HFT-робота для скальпинга "от плотностей" (Wall Bounce) на Bybit (режим Master Trader Copytrading).
+**Текущий фокус:** Безопасность исполнения (Safety) и реактивность (Low Latency).
+
+---
+
+## 🏗 Текущая Архитектура (Event-Driven & Resilient)
+Мы полностью отказались от polling-модели (`sleep(0.5)`) и внедрили гибридную систему исполнения, устойчивую к сетевым сбоям и гонкам состояний.
+
+1.  **C++ Core (`hft_core`):**
+    -   **Entity:** `ExecutionData` — структура для передачи сделок (ID, Price, Qty, Side, IsMaker).
+    -   **Parser:** `BybitParser` разбирает приватный топик `execution`.
+    -   **Routing:** `ExchangeStreamer` имеет отдельный канал `set_execution_callback`.
+
+2.  **Infrastructure (Python):**
+    -   **Dual Streamers:** `live_bot.py` запускает два независимых стримера:
+        1.  *Public:* `wss://stream.bybit.com/v5/public/linear` (Orderbook, Trades).
+        2.  *Private:* `wss://stream.bybit.com/v5/private` (Executions) с HMAC-аутентификацией.
+    -   **Fan-In:** Данные сливаются в единую `Shared Queue`.
+    -   **Resilience:** В `execution.py` внедрен Retry-механизм для REST-запросов (защита от `RemoteDisconnected`).
+
+3.  **Strategy Logic (Smart State Machine):**
+    -   **Reactive Entry:** Вход в позицию происходит мгновенно по событию `on_execution` (Push), без опроса API.
+    -   **Reactive Exit:** Стратегия отслеживает исполнение Take Profit и корректно сбрасывает стейт в `IDLE`.
+    -   **Anti-Ghost Protocol:** Реализована защита от "Призрачных исполнений" (Ghost Fills). При отмене ордера робот делает паузу 200мс и проверяет реальную позицию через REST. Если отмена не прошла — робот подхватывает позицию на лету.
+
+---
+
+## ✅ Что сделано (Completed Tasks)
+
+### 1. Low-Latency Execution
+* [x] **Event-Driven:** Реализован `on_execution` handler. Реакция на исполнение < 2мс.
+* [x] **No Polling:** Убран `await asyncio.sleep(0.5)` из цикла ожидания входа.
+
+### 2. Safety & Risk Management
+* [x] **Race Condition Fix:** Метод `_safe_cancel_and_reset` спасает депозит, если ордер исполнился в момент отмены.
+* [x] **Network Stability:** Внедрены ретраи в `fetch_ohlc` для подавления транзиентных ошибок сети.
+* [x] **Logs Hygiene:** Логи очищены от спама, добавлены четкие маркеры событий (`⚡ EXECUTION`, `😱 GHOST FILL`, `💰 TP FILLED`).
+
+### 3. Strategy Logic
+* [x] **Full Cycle:** Робот видит и вход (Entry), и выход (TP/SL).
+* [x] **Blind Spot Fix:** Исправлена ошибка, когда бот игнорировал исполнение Тейка из-за несовпадения OrderID.
+
+---
+
+## 📂 Структура файлов (Ключевые изменения)
+```text
+hft_core/
+├── include/entities/execution_data.hpp  (DTO)
+├── src/parsers/bybit_parser.cpp         (Execution parsing)
+hft_strategy/
+├── infrastructure/
+│   ├── market_bridge.py                 (Auth & Private Subs)
+│   ├── execution.py                     (Retry Logic)
+├── strategies/
+│   └── adaptive_live_strategy.py        (on_execution, _safe_cancel_and_reset)
+├── live_bot.py                          (Dual Streamer Setup)
+└── config.py                            (Private URL)
