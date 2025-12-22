@@ -1,0 +1,56 @@
+{
+    "ARCUSDT": {
+        "updated_at": "2025-12-20T14:31:27.878218",
+        "params": {
+            "wall_ratio_threshold": 5.30742902987755,
+            "min_wall_value_usdt": 5436.7370170865115,
+            "vol_ema_alpha": 0.033521258505347984
+        },
+        "score": -0.860058949622337
+    },
+    "RAVEUSDT": {
+        "updated_at": "2025-12-20T14:37:27.856987",
+        "params": {
+            "wall_ratio_threshold": 25.526518337417006,
+            "min_wall_value_usdt": 13097.88637937305,
+            "vol_ema_alpha": 0.018955904607758676
+        },
+        "score": 1.1039724284019268
+    },
+    "HMSTRUSDT": {
+        "updated_at": "2025-12-20T14:40:06.529221",
+        "params": {
+            "wall_ratio_threshold": 38.31724564521554,
+            "min_wall_value_usdt": 5152.302313239092,
+            "vol_ema_alpha": 0.0024937026056563822
+        },
+        "score": -0.7991730522915773
+    },
+    "LIGHTUSDT": {
+        "updated_at": "2025-12-20T14:46:17.039562",
+        "params": {
+            "wall_ratio_threshold": 14.382841972115344,
+            "min_wall_value_usdt": 5064.776945635372,
+            "vol_ema_alpha": 0.0023766483366896058
+        },
+        "score": -0.7821228661693196
+    },
+    "JELLYJELLYUSDT": {
+        "updated_at": "2025-12-20T14:50:44.515724",
+        "params": {
+            "wall_ratio_threshold": 16.725041770527046,
+            "min_wall_value_usdt": 5031.012478506498,
+            "vol_ema_alpha": 0.032591425343512954
+        },
+        "score": -0.8408951319131898
+    },
+    "BEATUSDT": {
+        "updated_at": "2025-12-20T14:22:37.287617",
+        "params": {
+            "wall_threshold": 11612.598078837642,
+            "tp_ticks": 50,
+            "sl_ticks": 13
+        },
+        "score": -999.0
+    }
+}

@@ -1,175 +1,140 @@
-# hft_strategy/optimization.py
-import sys
-import os
 import numpy as np
 import logging
 import optuna
+import traceback
 from hftbacktest import (
     HashMapMarketDepthBacktest, 
     BacktestAsset, 
     Recorder
 )
+from hft_strategy.strategies.adaptive_backtest import adaptive_strategy_backtest
 
-# Импортируем стратегию
-sys.path.append(os.getcwd())
-from hft_strategy.strategies.wall_bounce import wall_bounce_strategy
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-logger = logging.getLogger("OPTUNA")
 logging.getLogger("hftbacktest").setLevel(logging.ERROR)
+logger = logging.getLogger("OPTIMIZER")
 
-DATA_CACHE = None
-SYMBOL = "SOLUSDT"
+class StrategyOptimizer:
+    def __init__(self, symbol: str, data: np.ndarray, n_trials: int = 50):
+        self.symbol = symbol
+        self.data = data 
+        self.n_trials = n_trials
 
-def load_data_once():
-    global DATA_CACHE
-    if DATA_CACHE is not None:
-        return DATA_CACHE
+    def _calculate_metrics(self, recorder):
+        """
+        Robust metric calculation that never returns NaN.
+        """
+        data = recorder.get(0)
+        if len(data) < 2 or not data.dtype.names: 
+            return -999.0, 0
+
+        try:
+            names = data.dtype.names
+            col_equity = 'equity' if 'equity' in names else 'balance'
+            col_pos = 'position' if 'position' in names else 'pos'
+            
+            equity = data[col_equity]
+            position = data[col_pos]
+        except ValueError: 
+            return -999.0, 0
         
-    path = f"data/{SYMBOL}_v2.npz"
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Data file not found: {path}")
+        trades_count = np.count_nonzero(np.diff(position))
         
-    logger.info(f"📦 Loading data from {path}...")
-    DATA_CACHE = np.load(path)['data']
-    return DATA_CACHE
+        # 1. Если сделок нет или мало -> Штраф (но не NaN)
+        if trades_count < 5: 
+            return -10.0, trades_count # Малый штраф, чтобы Optuna понимала направление
 
-def get_col_name(names, candidates):
-    """Ищет первое совпадение из candidates в names"""
-    for c in candidates:
-        if c in names:
-            return c
-    return None
-
-def calculate_metrics_manually(recorder):
-    data = recorder.get(0)
-    if len(data) < 2:
-        return 0.0, 0
-
-    # === [FIX] ДИНАМИЧЕСКИЙ ПОИСК КОЛОНОК ===
-    if not data.dtype.names:
-        # Если вдруг вернулся сырой массив (но это вряд ли)
-        logger.error("Recorder returned non-structured array!")
-        return -999.0, 0
+        # 2. Расчет доходности с защитой от нулей
+        # equity[:-1] может быть 0 (банкротство), добавляем epsilon
+        denom = equity[:-1].copy()
+        denom[denom == 0] = 1e-9 
         
-    names = data.dtype.names
-    
-    # Ищем колонки по возможным именам
-    col_ts = get_col_name(names, ['timestamp', 'ts', 'time'])
-    col_mid = get_col_name(names, ['mid', 'price', 'px', 'last'])
-    col_bal = get_col_name(names, ['balance', 'equity', 'bal'])
-    col_pos = get_col_name(names, ['position', 'pos'])
-    col_fee = get_col_name(names, ['fee', 'cost'])
+        returns = np.diff(equity) / denom
+        
+        # Убираем Inf и NaN из массива доходностей (превращаем в 0)
+        returns = np.nan_to_num(returns, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        std_dev = np.std(returns)
+        
+        # 3. Защита от деления на ноль в Шарпе
+        if std_dev < 1e-9:
+            return 0.0, trades_count
 
-    if not (col_ts and col_mid and col_bal and col_pos):
-        # Если не нашли критические колонки — выводим список, чтобы ты мне показал
-        logger.error(f"❌ Columns missing! Available: {names}")
-        return -999.0, 0
+        sharpe = np.mean(returns) / std_dev * np.sqrt(len(returns))
+        
+        # 4. Финальная проверка результата
+        if not np.isfinite(sharpe):
+            return -1.0, trades_count
+            
+        return sharpe, trades_count
 
-    # Извлекаем данные
-    ts = data[col_ts]
-    mid = data[col_mid]
-    balance = data[col_bal]
-    position = data[col_pos]
-    fee = data[col_fee] if col_fee else np.zeros_like(balance)
-    
-    # Расчет Equity
-    equity = balance + (position * mid) - fee
-    
-    trades_count = np.count_nonzero(np.diff(position))
-    
-    if trades_count < 2:
-        return -10.0, trades_count 
+    def _estimate_tick_size(self):
+        prices = self.data['px']
+        prices = prices[prices > 0]
+        if len(prices) < 100: return 0.01
+        unique_prices = np.unique(prices[:10000])
+        if len(unique_prices) < 2: return 0.01
+        diffs = np.diff(unique_prices)
+        tick = np.min(diffs[diffs > 0])
+        return float(f"{tick:.8f}")
 
-    # --- Resampling (1 минута) ---
-    t_start = ts[0]
-    t_end = ts[-1]
-    interval = 60 * 1_000_000_000 
-    
-    if t_end - t_start < interval:
-        return -10.0, trades_count
+    def _objective(self, trial):
+        # Hyperparameters Space
+        p_ratio = trial.suggest_float("wall_ratio_threshold", 2.0, 50.0)
+        p_min_usdt = trial.suggest_float("min_wall_value_usdt", 5000.0, 500000.0, log=True)
+        p_alpha = trial.suggest_float("vol_ema_alpha", 0.001, 0.1, log=True)
 
-    target_ts = np.arange(t_start, t_end, interval)
-    idxs = np.searchsorted(ts, target_ts) - 1
-    idxs[idxs < 0] = 0
-    
-    eq_resampled = equity[idxs]
-    
-    with np.errstate(divide='ignore', invalid='ignore'):
-        returns = np.diff(eq_resampled) / eq_resampled[:-1]
-    
-    returns = np.nan_to_num(returns)
-    
-    if len(returns) == 0 or np.std(returns) == 0:
-        return 0.0, trades_count
-
-    # Annualized Sharpe
-    sharpe = np.mean(returns) / np.std(returns) * 725.0
-    
-    return sharpe, trades_count
-
-def objective(trial):
-    data = load_data_once()
-    
-    # Диапазоны
-    p_wall = trial.suggest_float("wall_threshold", 5.0, 200.0, step=5.0)
-    p_tp = trial.suggest_int("tp_ticks", 5, 50)
-    p_sl = trial.suggest_int("sl_ticks", 5, 50)
-    
-    asset = (
-        BacktestAsset()
-        .data([data])
-        .linear_asset(1.0)
-        .tick_size(0.01)
-        .lot_size(0.1)
-        .constant_order_latency(10_000_000, 10_000_000)
-    )
-    hbt = HashMapMarketDepthBacktest([asset])
-    recorder = Recorder(1, 10_000_000)
-    
-    try:
-        wall_bounce_strategy(
-            hbt, 
-            recorder.recorder, 
-            wall_threshold=p_wall,
-            tp_ticks=p_tp,
-            sl_ticks=p_sl
+        tick_size = self._estimate_tick_size()
+        
+        asset = (
+            BacktestAsset()
+            .data([self.data]) 
+            .linear_asset(1.0)
+            .tick_size(tick_size)
+            .lot_size(0.1) 
+            .constant_order_latency(10_000_000, 10_000_000)
         )
-    except Exception:
-        return -999.0
+        hbt = HashMapMarketDepthBacktest([asset])
+        recorder = Recorder(1, 10_000_000)
+        
+        try:
+            adaptive_strategy_backtest(
+                hbt, 
+                recorder.recorder, 
+                wall_ratio_threshold=p_ratio,
+                min_wall_value_usdt=p_min_usdt,
+                vol_ema_alpha=p_alpha
+            )
+        except Exception:
+            # Логируем ошибку, но возвращаем плохое число, а не крашим процесс
+            traceback.print_exc()
+            return -999.0
 
-    sharpe, trades = calculate_metrics_manually(recorder)
-    
-    # Логируем успешные проходы (опционально)
-    # if trades > 10:
-    #     logger.info(f"Trial OK: Sharpe={sharpe:.2f}, Trades={trades}")
+        sharpe, trades = self._calculate_metrics(recorder)
+        
+        # Если вернулся NaN (чего быть не должно), превращаем в штраф
+        if not np.isfinite(sharpe):
+            return -999.0
+            
+        # Бонус за количество сделок (логарифмический), чтобы не сидеть без дела
+        safe_trades = max(trades, 1)
+        score = sharpe + np.log(safe_trades) * 0.05
+        
+        return score
 
-    if trades < 5:
-        return -100.0
+    def run(self) -> dict:
+        # Уникальное имя study, чтобы не конфликтовать со старыми NaN записями
+        study_name = f"study_{self.symbol}_v4_robust" 
         
-    score = sharpe + np.log(trades) * 0.2
-    return score
-
-if __name__ == "__main__":
-    try:
-        load_data_once()
-        # Выводим инфо о полях один раз для диагностики
-        # (в реальном запуске Optuna это будет мешать, но для дебага нужно)
-        dummy_rec = Recorder(1, 100)
-        # Просто создали, чтобы тип проверить, но данных нет.
-        # Ладно, calculate_metrics_manually сама залогирует ошибку, если что.
+        # Создаем storage в памяти или SQLite (здесь в памяти для скорости)
+        study = optuna.create_study(direction="maximize", study_name=study_name)
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
         
-        logger.info("🧠 Starting Optimization (Robust Mode)...")
-        study = optuna.create_study(direction="maximize")
-        study.optimize(objective, n_trials=50, n_jobs=1)
+        logger.info(f"🧠 Optimizing {self.symbol} [Robust Mode]...")
+        study.optimize(self._objective, n_trials=self.n_trials, n_jobs=1)
         
-        print("\n" + "="*40)
-        print("🏆 BEST PARAMETERS")
-        print("="*40)
-        print(study.best_params)
-        print(f"Best Score: {study.best_value}")
-        
-    except KeyboardInterrupt:
-        print("\n🛑 Stopped.")
-    except Exception as e:
-        logger.error(f"Critical: {e}", exc_info=True)
+        best_result = {
+            "symbol": self.symbol,
+            "params": study.best_params,
+            "score": study.best_value
+        }
+        logger.info(f"🏆 {self.symbol} Best: {best_result['params']} (Score: {study.best_value:.2f})")
+        return best_result
