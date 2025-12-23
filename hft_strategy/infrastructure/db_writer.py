@@ -96,3 +96,39 @@ class BufferedTickWriter:
         self._running = False
         if self._flush_task: self._flush_task.cancel()
         await self._flush()
+
+class NullRepository:
+    """
+    Пустая реализация репозитория.
+    Соблюдает интерфейс TimescaleRepository, но методы ничего не делают.
+    """
+    async def connect(self):
+        logging.getLogger("DB_WRITER").info("⚠️ NullRepository: DB connection skipped (Mode: NO_DB)")
+
+    async def save_ticks(self, records):
+        pass
+
+    async def save_depth_snapshots(self, records):
+        pass
+
+    async def close(self):
+        pass
+
+class NullTickWriter:
+    """
+    Пустая реализация писателя.
+    Принимает события, но никуда их не сохраняет и не буферизирует.
+    """
+    def __init__(self, repository=None, batch_size=1000):
+        # repository здесь даже не нужен, но оставляем для совместимости сигнатур
+        pass
+
+    async def start(self):
+        logging.getLogger("DB_WRITER").info("⚠️ NullTickWriter started: History will NOT be saved.")
+
+    async def add_event(self, event):
+        # Просто игнорируем событие
+        pass
+
+    async def stop(self):
+        pass        

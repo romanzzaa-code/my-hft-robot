@@ -11,9 +11,9 @@ class StrategyParameters:
     min_qty: float = 0.0
     
     # --- ЛОГИКА СТЕН ---
-    wall_ratio_threshold: float = 3.0
-    min_wall_value_usdt: float = 10000.0
-    vol_ema_alpha: float = 0.01 
+    wall_ratio_threshold: float = 25.0
+    min_wall_value_usdt: float = 100000.0
+    vol_ema_alpha: float = 0.018955904607758676 
     
     # --- РИСК-МЕНЕДЖМЕНТ ---
     entry_delta_ticks: int = 1
