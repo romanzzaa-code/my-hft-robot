@@ -3,12 +3,11 @@ import logging
 import asyncio
 import math
 import time
-from enum import Enum, auto
-from dataclasses import dataclass
-from typing import Optional, Dict, List, Union
+from typing import Optional, Dict, Union
 
 from hft_strategy.domain.interfaces import IExecutionHandler 
 from hft_strategy.domain.strategy_config import StrategyParameters
+from hft_strategy.domain.trade_context import TradeContext, StrategyState
 
 logger = logging.getLogger("ADAPTIVE_STRAT")
 
@@ -71,22 +70,6 @@ class LocalOrderBook:
         if not volumes: return 0.0
         return sum(volumes) / len(volumes)
 
-# --- States & Context ---
-class StrategyState(Enum):
-    IDLE = auto()          # Поиск входа
-    ORDER_PLACED = auto()  # Лимитка в стакане, ждем исполнения
-    IN_POSITION = auto()   # Позиция набрана, ведем сделку
-
-@dataclass
-class TradeContext:
-    side: str              # "Buy" или "Sell"
-    wall_price: float      # Цена стены
-    entry_price: float     # Цена входа (наша лимитка)
-    quantity: float        # Размер
-    order_id: str          # ID ордера на вход
-    tp_order_id: Optional[str] = None # ID Тейка
-    placed_ts: float = 0.0 # Время выставления (для таймаута)
-
 # --- Strategy ---
 class AdaptiveWallStrategy:
     def __init__(self, executor: IExecutionHandler, cfg: StrategyParameters):
@@ -143,33 +126,91 @@ class AdaptiveWallStrategy:
             
             await asyncio.sleep(60)
 
-    # --- 2. EXECUTION HANDLER (EVENT DRIVEN) ---
-    # --- 2. EXECUTION HANDLER (EVENT DRIVEN) ---
+    # --- 2. EXECUTION HANDLER (REACTIVE & SAFE) ---
     async def on_execution(self, event):
         """
-        [NEW] Реактивный вход и выход.
+        Обработчик событий исполнения. Теперь поддерживает частичные филлы и кумулятивный учет.
         """
         async with self._lock:
             if not self.ctx:
                 return
 
-            # СЦЕНАРИЙ 1: Исполнение ВХОДА (Entry)
+            # СЦЕНАРИЙ 1: Исполнение ВХОДА (Partial Fill или Full Fill)
             if event.order_id == self.ctx.order_id:
+                new_fill = event.exec_qty
+                self.ctx.filled_qty += new_fill
+                
+                logger.info(f"⚡ FILL: {event.symbol} +{new_fill} (Total: {self.ctx.filled_qty}/{self.ctx.quantity})")
+
+                # Если это первый филл - переходим в состояние позиции
                 if self.state == StrategyState.ORDER_PLACED:
-                    logger.info(f"⚡ ENTRY FILLED: {event.side} {event.exec_qty} @ {event.exec_price}")
                     self.state = StrategyState.IN_POSITION
+                    # Запоминаем цену входа (первого филла) как базовую
                     self.ctx.entry_price = event.exec_price
-                    await self._place_take_profit()
+
+                # Синхронизируем Тейк-Профит с реальным объемом
+                await self._sync_take_profit()
                 return
 
-            # СЦЕНАРИЙ 2: Исполнение ТЕЙКА (TP)
-            # [FIX] Теперь мы ловим и этот ID
+            # СЦЕНАРИЙ 2: Исполнение ВЫХОДА (Тейк-Профит)
             if self.ctx.tp_order_id and event.order_id == self.ctx.tp_order_id:
-                logger.info(f"💰 TP FILLED: {event.side} {event.exec_qty} @ {event.exec_price}. Trade Closed.")
-                self._reset_state()
+                filled_exit = event.exec_qty
+                self.ctx.filled_qty -= filled_exit
+                
+                # Защита от float-погрешностей (1e-9)
+                if self.ctx.filled_qty <= 1e-9:
+                    logger.info(f"💰 POSITION CLOSED FULLY: {event.symbol}")
+                    self._reset_state()
+                else:
+                    logger.info(f"📉 TP PARTIAL EXECUTION: -{filled_exit}. Remaining: {self.ctx.filled_qty}")
                 return
 
-            # Если пришел какой-то левый ID (например, старый ордер), игнорируем
+    async def _sync_take_profit(self):
+        """
+        Динамически управляет Тейк-Профитом: создает новый или обновляет (amend) старый.
+        """
+        if self.ctx.filled_qty <= 1e-9: return
+
+        # Логика цены Тейка
+        tp_price = self._calculate_tp_price()
+        tp_side = "Sell" if self.ctx.side == "Buy" else "Buy"
+
+        # 1. Если Тейка еще нет — создаем с флагом ReduceOnly
+        if not self.ctx.tp_order_id:
+            logger.info(f"🎯 PLACING TP: {self.ctx.filled_qty} @ {tp_price} (ReduceOnly)")
+            
+            oid = await self.exec.place_limit_maker(
+                self.cfg.symbol, 
+                tp_side, 
+                tp_price, 
+                self.ctx.filled_qty, 
+                reduce_only=True # <--- ЗАЩИТА ОТ ПЕРЕВОРОТА
+            )
+            if oid:
+                self.ctx.tp_order_id = oid
+        
+        # 2. Если Тейк уже есть — обновляем объем через Amend
+        else:
+            # logger.info(f"📝 AMENDING TP: {self.ctx.tp_order_id} -> {self.ctx.filled_qty}")
+            success = await self.exec.amend_order(
+                self.cfg.symbol, 
+                self.ctx.tp_order_id, 
+                self.ctx.filled_qty
+            )
+            if not success:
+                logger.warning("⚠️ Amend failed. Waiting for next execution event or reset.")
+
+    def _calculate_tp_price(self) -> float:
+        if self.cfg.use_dynamic_tp:
+            delta_price = self.ctx.entry_price * (self.current_tp_pct / 100.0)
+            tp_ticks = delta_price / self.tick_size
+            tp_ticks = max(1, round(tp_ticks))
+        else:
+            tp_ticks = self.cfg.fixed_tp_ticks
+
+        sign = 1 if self.ctx.side == "Buy" else -1
+        tp_price = self.ctx.entry_price + (sign * tp_ticks * self.tick_size)
+        return self._round_price(tp_price)
 
     # --- 3. MARKET DATA HANDLER ---
     async def on_depth(self, snapshot):
@@ -185,7 +226,7 @@ class AdaptiveWallStrategy:
                 best_bid_p = self.lob.get_best("Buy")
                 best_ask_p = self.lob.get_best("Sell")
 
-                # FSM (Finite State Machine)
+                # FSM
                 if self.state == StrategyState.IDLE:
                     await self._logic_idle(best_bid_p, best_ask_p)
 
@@ -211,16 +252,12 @@ class AdaptiveWallStrategy:
     # --- LOGIC PER STATE ---
 
     async def _logic_idle(self, best_bid_p, best_ask_p):
-        """Поиск стен и вход в сделку"""
         best_bid_v = self.lob.get_volume("Buy", best_bid_p)
         best_ask_v = self.lob.get_volume("Sell", best_ask_p)
 
         threshold = self.avg_vol * self.cfg.wall_ratio_threshold
         is_bid_wall = best_bid_v > threshold and (best_bid_v * best_bid_p > self.cfg.min_wall_value_usdt)
         is_ask_wall = best_ask_v > threshold and (best_ask_v * best_ask_p > self.cfg.min_wall_value_usdt)
-
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"👀 SCAN: Bg={self.avg_vol:.0f} | BidWall={is_bid_wall} | AskWall={is_ask_wall}")
 
         if is_bid_wall or is_ask_wall:
             self._wall_confirms += 1
@@ -229,107 +266,36 @@ class AdaptiveWallStrategy:
 
         if self._wall_confirms >= self._required_confirms:
             if is_bid_wall:
-                # Встаем перед стеной на покупку (Long)
                 await self._place_entry_order("Buy", best_bid_p, best_bid_p + self.tick_size)
             elif is_ask_wall:
-                # Встаем перед стеной на продажу (Short)
                 await self._place_entry_order("Sell", best_ask_p, best_ask_p - self.tick_size)
             
-            # Сброс счетчика, чтобы не спамить
             self._wall_confirms = 0 
 
     async def _logic_order_placed(self):
-        """
-        Логика ожидания входа.
-        Здесь мы следим за целостностью стены.
-        """
-        # Если стена исчезла, пока мы стояли в очереди -> попытка отмены
         if not self._check_wall_integrity():
-            logger.debug("🧱 Wall collapsed. Initiating cancel sequence...")
-            
-            # 1. Отправляем отмену
-            await self.exec.cancel_order(self.cfg.symbol, self.ctx.order_id)
-            
-            # 2. [CRITICAL FIX] Race Condition Protection
-            # Нельзя просто так взять и сделать reset_state.
-            # Ордер мог исполниться в момент отмены.
-            
-            # Небольшая пауза, чтобы матчинг биржи успел обновить баланс/вернуть ошибку
-            # Это не polling, это safety wait перед принятием решения о судьбе депозита.
-            await asyncio.sleep(0.2)
-            
-            # 3. Проверка Истины (Single Source of Truth)
-            # Спрашиваем у биржи: "Мы в позиции?"
-            real_pos = await self.exec.get_position(self.cfg.symbol)
-            
-            # Проверяем, совпадает ли реальная позиция с нашим ожиданием
-            is_accidentally_filled = False
-            
-            if self.ctx.side == "Buy":
-                # Если мы хотели купить 100, а у нас есть > 10 (учитываем частичное исполнение)
-                if real_pos >= self.ctx.quantity * 0.1: 
-                    is_accidentally_filled = True
-            else:
-                if real_pos <= -self.ctx.quantity * 0.1:
-                    is_accidentally_filled = True
-
-            if is_accidentally_filled:
-                logger.warning(f"😱 GHOST FILL DETECTED! Cancel failed, we are IN POSITION: {real_pos}")
-                
-                self.state = StrategyState.IN_POSITION
-                
-                # На всякий случай обновляем цену входа (если она была 0, берем текущую рыночную как ориентир)
-                # или оставляем лимитную.
-                
-                # Срочно ставим Тейк, если его еще нет
-                if not self.ctx.tp_order_id:
-                    await self._place_take_profit()
-                    
-            else:
-                # Фух, пронесло. Действительно вышли.
-                logger.info("✅ Order cancelled cleanly. Resetting state.")
-                self._reset_state()
-            
+            logger.debug("🧱 Wall collapsed. Cancelling entry...")
+            await self._safe_cancel_and_reset()
             return
         
-        # Также можно добавить таймаут (если ордер висит > 10 сек)
         if time.time() - self.ctx.placed_ts > 15.0:
              logger.debug("⏳ Order timed out. Cancelling...")
-             await self._cancel_and_reset()
-
-
-    async def _safe_cancel_and_reset(self):
-        await self.exec.cancel_order(self.cfg.symbol, self.ctx.order_id)
-        await asyncio.sleep(0.2)
-        
-        real_pos = await self.exec.get_position(self.cfg.symbol)
-        
-        # Упрощенная проверка "Есть ли позиция в нашу сторону?"
-        has_pos = (self.ctx.side == "Buy" and real_pos > 0) or (self.ctx.side == "Sell" and real_pos < 0)
-        
-        if has_pos:
-            logger.warning(f"⚠️ Order filled during cancel sequence. Transitioning to IN_POSITION.")
-            self.state = StrategyState.IN_POSITION
-            await self._place_take_profit()
-        else:
-            self._reset_state()
-
+             await self._safe_cancel_and_reset()
 
     async def _logic_in_position(self, best_bid, best_ask):
-        """Ведение позиции (Stop Loss, Breakout)"""
+        if self.ctx.filled_qty <= 1e-9: return
+
         exit_price = best_bid if self.ctx.side == "Buy" else best_ask
-        
-        # 1. PnL Check
         delta = (exit_price - self.ctx.entry_price) if self.ctx.side == "Buy" else (self.ctx.entry_price - exit_price)
         pnl_ticks = delta / self.tick_size
         
+        # Stop Loss Check
         if pnl_ticks <= -self.cfg.stop_loss_ticks:
-            logger.warning(f"🛑 STOP LOSS: {pnl_ticks:.1f} ticks. Executing Panic Exit.")
+            logger.warning(f"🛑 STOP LOSS: {pnl_ticks:.1f} ticks. Panic Exit.")
             await self._panic_exit()
             return
 
-        # 2. Пробой стены (Breakout)
-        # Если цена ушла ЗА стену (то есть стену съели)
+        # Wall Breakout Check
         wall_broken = False
         if self.ctx.side == "Buy":
             if exit_price < self.ctx.wall_price: wall_broken = True
@@ -340,11 +306,6 @@ class AdaptiveWallStrategy:
             logger.warning(f"🔨 WALL BROKEN! Price {exit_price} breached Wall {self.ctx.wall_price}")
             await self._panic_exit()
             return
-
-        # 3. Check Balance (редкая проверка для синхронизации)
-        # Если позиция закрылась по Тейку (который висит на бирже), мы об этом узнаем через execution,
-        # но на всякий случай можно оставить редкий чек баланса или просто ждать события.
-        # В Clean Event-Driven архитектуре здесь ничего делать не нужно.
 
     # --- ACTIONS ---
 
@@ -358,7 +319,9 @@ class AdaptiveWallStrategy:
 
         logger.info(f"🧱 FOUND WALL {side} @ {wall_price}. Placing limit @ {price}")
         
-        oid = await self.exec.place_limit_maker(self.cfg.symbol, side, price, qty)
+        # ReduceOnly = False для входа (мы открываем позицию)
+        oid = await self.exec.place_limit_maker(self.cfg.symbol, side, price, qty, reduce_only=False)
+        
         if oid:
             self.state = StrategyState.ORDER_PLACED
             self.ctx = TradeContext(
@@ -367,48 +330,50 @@ class AdaptiveWallStrategy:
                 entry_price=price, 
                 quantity=qty, 
                 order_id=oid,
+                filled_qty=0.0,
                 placed_ts=time.time()
             )
 
-    async def _place_take_profit(self):
-        if self.cfg.use_dynamic_tp:
-            delta_price = self.ctx.entry_price * (self.current_tp_pct / 100.0)
-            tp_ticks = delta_price / self.tick_size
-            tp_ticks = max(1, round(tp_ticks))
+    async def _safe_cancel_and_reset(self):
+        """Безопасная отмена с проверкой, не исполнился ли ордер в процессе."""
+        await self.exec.cancel_order(self.cfg.symbol, self.ctx.order_id)
+        
+        # Пауза для синхронизации состояния
+        await asyncio.sleep(0.2)
+        
+        # Если filled_qty > 0, значит ордер успел исполниться, пока мы его отменяли.
+        # on_execution уже обновил state до IN_POSITION, поэтому сбрасывать не надо.
+        if self.ctx.filled_qty > 0:
+            logger.warning(f"⚠️ Cancelled order was partially filled: {self.ctx.filled_qty}. Staying IN_POSITION.")
+            # Убеждаемся, что Тейк выставлен
+            await self._sync_take_profit()
         else:
-            tp_ticks = self.cfg.fixed_tp_ticks
-
-        tp_side = "Sell" if self.ctx.side == "Buy" else "Buy"
-        sign = 1 if self.ctx.side == "Buy" else -1
-        
-        tp_price = self.ctx.entry_price + (sign * tp_ticks * self.tick_size)
-        tp_price = self._round_price(tp_price)
-        
-        logger.info(f"🎯 PLACING TP @ {tp_price} (+{tp_ticks} ticks)")
-        
-        oid = await self.exec.place_limit_maker(self.cfg.symbol, tp_side, tp_price, self.ctx.quantity)
-        self.ctx.tp_order_id = oid
-
-    async def _cancel_and_reset(self):
-        """Отмена ордера и сброс состояния"""
-        if self.ctx and self.ctx.order_id:
-            await self.exec.cancel_order(self.cfg.symbol, self.ctx.order_id)
-        self._reset_state()
+            self._reset_state()
 
     async def _panic_exit(self):
-        """Закрытие по рынку"""
+        """Экстренный выход по рынку."""
+        if not self.ctx or self.ctx.filled_qty <= 1e-9: return
+        
+        # 1. Отменяем Тейк (чтобы не дублировать закрытие)
         if self.ctx.tp_order_id:
             await self.exec.cancel_order(self.cfg.symbol, self.ctx.tp_order_id)
             self.ctx.tp_order_id = None
         
+        # 2. Кидаем Маркет с флагом ReduceOnly
         exit_side = "Sell" if self.ctx.side == "Buy" else "Buy"
-        await self.exec.place_market_order(self.cfg.symbol, exit_side, self.ctx.quantity)
+        logger.warning(f"🚨 PANIC EXIT: {exit_side} {self.ctx.filled_qty} (ReduceOnly)")
+        
+        await self.exec.place_market_order(
+            self.cfg.symbol, 
+            exit_side, 
+            self.ctx.filled_qty, 
+            reduce_only=True # <--- ВАЖНАЯ ЗАЩИТА
+        )
         self._reset_state()
 
     # --- HELPERS ---
     def _check_wall_integrity(self) -> bool:
         current_vol = self.lob.get_volume(self.ctx.side, self.ctx.wall_price)
-        # Если объем упал ниже 50% от среднего, считаем стену снятой
         threshold = self.avg_vol * self.cfg.wall_ratio_threshold * 0.5
         return current_vol > threshold
 

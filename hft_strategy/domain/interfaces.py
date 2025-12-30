@@ -3,7 +3,8 @@ from typing import Protocol, Optional, List, Dict
 
 class IExecutionHandler(Protocol):
     """
-    Интерфейс теперь требует явного указания символа для каждой операции.
+    Интерфейс исполнителя.
+    [UPDATED] Добавлены reduce_only и amend_order для безопасного управления позицией.
     """
     
     async def fetch_instrument_info(self, symbol: str) -> tuple[float, float, float]:
@@ -12,18 +13,24 @@ class IExecutionHandler(Protocol):
     async def fetch_ohlc(self, symbol: str, interval: str = "5", limit: int = 20) -> List[Dict]:
         ...
 
-    # [FIX] Добавляем symbol: str
-    async def place_limit_maker(self, symbol: str, side: str, price: float, qty: float) -> Optional[str]:
+    # [UPDATE] Добавлен reduce_only
+    async def place_limit_maker(
+        self, symbol: str, side: str, price: float, qty: float, reduce_only: bool = False
+    ) -> Optional[str]:
         ...
 
-    # [FIX] Добавляем symbol: str
-    async def place_market_order(self, symbol: str, side: str, qty: float) -> Optional[str]:
+    # [UPDATE] Добавлен reduce_only
+    async def place_market_order(
+        self, symbol: str, side: str, qty: float, reduce_only: bool = False
+    ) -> Optional[str]:
         ...
 
-    # [FIX] Добавляем symbol: str (для отмены тоже важно знать контекст, хотя API Bybit позволяет и без, но для консистентности лучше передать)
+    # [NEW] Метод для изменения активного ордера (например, объема Тейка)
+    async def amend_order(self, symbol: str, order_id: str, qty: float) -> bool:
+        ...
+
     async def cancel_order(self, symbol: str, order_id: str) -> None:
         ...
 
-    # [FIX] Добавляем symbol: str
     async def get_position(self, symbol: str) -> float:
         ...

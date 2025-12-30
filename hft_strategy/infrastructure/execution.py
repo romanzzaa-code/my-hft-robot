@@ -3,7 +3,6 @@ import logging
 import asyncio
 from typing import Optional, List, Dict
 from pybit.unified_trading import HTTP 
-# from hft_strategy.config import TRADING_CONFIG <-- Больше не нужен здесь для символа
 
 logger = logging.getLogger("EXECUTION")
 
@@ -22,14 +21,12 @@ class BybitExecutionHandler:
         else:
             logger.warning("⚠️ Execution: READ-ONLY (No Keys provided)")
 
-        # self.symbol = TRADING_CONFIG.symbol  <-- УДАЛЯЕМ ЭТО ПОЛЕ
         self.category = "linear"
 
     def _fmt(self, val: float) -> str:
         return "{:.8f}".format(val).rstrip('0').rstrip('.')
 
     async def fetch_instrument_info(self, symbol: str) -> tuple[float, float, float]:
-        # ... (код без изменений, тут symbol и так передавался)
         if self.read_only and not self.client:
             return 0.01, 0.1, 0.1
         try:
@@ -50,74 +47,50 @@ class BybitExecutionHandler:
             logger.error(f"❌ Failed to fetch instrument info: {e}")
             raise 
 
-    # ... (внутри класса BybitExecutionHandler)
-
     async def fetch_ohlc(self, symbol: str, interval: str = "5", limit: int = 20) -> List[Dict]:
         if self.read_only: 
             return []
-            
-        # Попыток запроса (1 основной + 2 ретрая)
         max_retries = 3
-        
         for attempt in range(max_retries):
             try:
                 loop = asyncio.get_running_loop()
-                
-                # Выполняем блокирующий запрос в отдельном потоке
                 resp = await loop.run_in_executor(None, lambda: self.client.get_kline(
                     category=self.category,
                     symbol=symbol,
                     interval=interval,
                     limit=limit
                 ))
-                
                 if resp['retCode'] != 0:
-                    # Логическая ошибка API (не сеть) — ретраить нет смысла, если это не Rate Limit
-                    # Но для простоты вернем пустоту
                     logger.warning(f"⚠️ OHLC Error {symbol}: {resp.get('retMsg')}")
                     return []
-
                 klines = []
                 for k in resp['result']['list']:
-                    high = float(k[2])
-                    low = float(k[3])
-                    close = float(k[4])
-                    klines.append({"h": high, "l": low, "c": close})
-                
+                    klines.append({"h": float(k[2]), "l": float(k[3]), "c": float(k[4])})
                 return klines
-
             except Exception as e:
-                # Проверяем, является ли ошибка сетевой (Connection aborted, RemoteDisconnected, SSL Error)
                 err_msg = str(e)
-                is_network_error = "Connection" in err_msg or "Disconnected" in err_msg or "Reset" in err_msg
-                
-                if is_network_error and attempt < max_retries - 1:
-                    # Экспоненциальная задержка: 0.2с, 0.4с
-                    sleep_time = 0.2 * (attempt + 1)
-                    # logger.debug(f"🔄 Retry fetch_ohlc ({attempt+1}/{max_retries}) due to: {e}")
-                    await asyncio.sleep(sleep_time)
+                if ("Connection" in err_msg or "Disconnected" in err_msg) and attempt < max_retries - 1:
+                    await asyncio.sleep(0.2 * (attempt + 1))
                     continue
-                
-                # Если попытки кончились или ошибка критическая — логируем
                 if attempt == max_retries - 1:
-                    logger.error(f"❌ Failed to fetch OHLC after {max_retries} attempts: {e}")
-                    
+                    logger.error(f"❌ Failed to fetch OHLC: {e}")
         return []
 
-    # [FIX] Добавлен аргумент symbol
-    async def place_market_order(self, symbol: str, side: str, qty: float) -> Optional[str]:
+    # [UPDATE] Добавлен аргумент reduce_only
+    async def place_market_order(self, symbol: str, side: str, qty: float, reduce_only: bool = False) -> Optional[str]:
         if self.read_only:
-            logger.info(f"🕶️ [SIM] MARKET {side} {qty} (Panic Exit) on {symbol}")
+            logger.info(f"🕶️ [SIM] MARKET {side} {qty} (RO={reduce_only}) on {symbol}")
             return f"sim_market_{int(asyncio.get_running_loop().time())}"
 
         try:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(None, lambda: self.client.place_order(
                 category=self.category,
-                symbol=symbol,       # <--- ИСПОЛЬЗУЕМ АРГУМЕНТ
+                symbol=symbol,
                 side=side.capitalize(),
                 orderType="Market",
                 qty=self._fmt(qty),
+                reduceOnly=reduce_only,  # <--- Передаем в API
                 orderLinkId=f"panic_{int(loop.time()*1000)}"
             ))
             oid = result['result']['orderId']
@@ -127,22 +100,23 @@ class BybitExecutionHandler:
             logger.error(f"❌ Market Order Failed: {e}")
             return None
 
-    # [FIX] Добавлен аргумент symbol
-    async def place_limit_maker(self, symbol: str, side: str, price: float, qty: float) -> Optional[str]:
+    # [UPDATE] Добавлен аргумент reduce_only
+    async def place_limit_maker(self, symbol: str, side: str, price: float, qty: float, reduce_only: bool = False) -> Optional[str]:
         if self.read_only:
-            logger.info(f"🕶️ [SIM] PLACING {side} {qty} @ {price} on {symbol}")
+            logger.info(f"🕶️ [SIM] PLACING {side} {qty} @ {price} (RO={reduce_only}) on {symbol}")
             return f"sim_oid_{int(asyncio.get_running_loop().time())}"
 
         try:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(None, lambda: self.client.place_order(
                 category=self.category,
-                symbol=symbol,       # <--- ИСПОЛЬЗУЕМ АРГУМЕНТ
+                symbol=symbol,
                 side=side.capitalize(),
                 orderType="Limit",
                 qty=self._fmt(qty),
                 price=self._fmt(price),
                 timeInForce="PostOnly", 
+                reduceOnly=reduce_only, # <--- Передаем в API
                 orderLinkId=f"hft_{int(loop.time()*1000)}"
             ))
             oid = result['result']['orderId']
@@ -152,7 +126,31 @@ class BybitExecutionHandler:
             logger.error(f"❌ Order Failed: {e}")
             return None
 
-    # [FIX] Добавлен аргумент symbol
+    # [NEW] Реализация метода amend_order
+    async def amend_order(self, symbol: str, order_id: str, qty: float) -> bool:
+        """
+        Изменяет параметры существующего ордера.
+        Используется для подгонки объема Тейк-Профита под реальную позицию.
+        """
+        if self.read_only:
+            logger.info(f"🕶️ [SIM] AMEND {order_id} on {symbol} -> New Qty: {qty}")
+            return True
+
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: self.client.amend_order(
+                category=self.category,
+                symbol=symbol,
+                orderId=order_id,
+                qty=self._fmt(qty)
+            ))
+            logger.info(f"📝 AMENDED: {order_id} ({symbol}) new Qty: {qty}")
+            return True
+        except Exception as e:
+            # Ошибка 10001/110001 (Order not exists/Modified) допустима, если ордер уже исполнился
+            logger.warning(f"⚠️ Amend failed: {e}")
+            return False
+
     async def cancel_order(self, symbol: str, order_id: str):
         if self.read_only:
             logger.info(f"🕶️ [SIM] CANCEL {order_id} on {symbol}")
@@ -162,33 +160,26 @@ class BybitExecutionHandler:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: self.client.cancel_order(
                 category=self.category,
-                symbol=symbol,       # <--- ИСПОЛЬЗУЕМ АРГУМЕНТ
+                symbol=symbol,
                 orderId=order_id
             ))
             logger.info(f"🗑️ CANCELLED: {order_id} on {symbol}")
         except Exception as e:
-            # [FIX] Если ошибка "Order not exists" (110001) - это не Error, это Info
             str_e = str(e)
             if "110001" in str_e or "Order not exists" in str_e:
                 logger.info(f"ℹ️ Cancel skipped (Order gone): {order_id}")
             else:
                 logger.error(f"❌ Cancel Failed: {e}")
 
-    # [FIX] Добавлен аргумент symbol
     async def get_position(self, symbol: str) -> float:
-        if self.read_only:
-            return 0.0
-
+        if self.read_only: return 0.0
         try:
             loop = asyncio.get_running_loop()
-            # Передаем symbol в запрос
             resp = await loop.run_in_executor(None, lambda: self.client.get_positions(
                 category=self.category,
-                symbol=symbol        # <--- ИСПОЛЬЗУЕМ АРГУМЕНТ
+                symbol=symbol
             ))
-            # Список может быть пустым или содержать позицию
             for pos in resp['result']['list']:
-                # Bybit может вернуть список, фильтруем нужный символ на всякий случай
                 if pos['symbol'] == symbol:
                     size = float(pos['size'])
                     side = pos['side']
