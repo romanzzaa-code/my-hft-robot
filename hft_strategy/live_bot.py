@@ -6,16 +6,32 @@ import os
 from typing import Dict, Set
 from dotenv import load_dotenv
 
-# --- PATH HACK (Оставляем для совместимости с C++ модулем) ---
+# --- PATH HACK (Исправленная версия для Mac/Linux) ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
+
+# 1. Добавляем корень проекта, чтобы видеть hft_strategy
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-build_path_release = os.path.join(project_root, "hft_core", "build", "Release")
-if os.path.exists(build_path_release):
-    if build_path_release not in sys.path:
-        sys.path.insert(0, build_path_release)
+# 2. Ищем скомпилированное ядро C++
+# На Windows оно часто в build/Release, на Mac/Linux просто в build
+possible_paths = [
+    os.path.join(project_root, "hft_core", "build", "Release"),
+    os.path.join(project_root, "hft_core", "build"),
+]
+
+core_found = False
+for p in possible_paths:
+    if os.path.exists(p):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+            print(f"🔌 Loaded hft_core from: {p}")
+        core_found = True
+        break
+
+if not core_found:
+    print("⚠️ WARNING: Compiled hft_core not found! Check paths.")
 # -------------------------------------------------------------
 
 import hft_core 

@@ -1,22 +1,28 @@
 #include "../../include/parsers/bybit_parser.hpp" 
-#include "../../include/entities/ticker_data.hpp" // <--- Не забудь этот инклюд!
+#include "../../include/entities/ticker_data.hpp" 
 #include <iostream>
 #include <charconv>
 #include <chrono>
+#include <cstdlib> // <--- Добавлено для std::strtod
 #include "../../include/entities/execution_data.hpp"
 
-// Вспомогательная функция (оставь как есть, если она уже была)
+// Вспомогательная функция с фиксом для Mac M1/M2/M3
 static double extract_double(simdjson::ondemand::value val) {
-    double res = 0.0;
+    // 1. Пробуем достать число напрямую (быстро)
     if (auto num = val.get_double(); !num.error()) {
         return num.value();
     }
+    
+    // 2. Если это строка — парсим вручную
     std::string_view sv;
     if (auto str = val.get_string(); !str.error()) {
         sv = str.value();
         if (sv.empty()) return 0.0;
-        // Пытаемся распарсить строку
-        std::from_chars(sv.data(), sv.data() + sv.size(), res);
+        
+        // FIX: Использование strtod вместо from_chars для double на macOS
+        std::string s(sv);
+        char* end;
+        double res = std::strtod(s.c_str(), &end);
         return res;
     }
     return 0.0;
@@ -29,13 +35,12 @@ static double extract_from_result(simdjson::simdjson_result<simdjson::ondemand::
     return 0.0;
 }
 
-// Обновленная сигнатура метода parse
 ParseResultType BybitParser::parse(
     const std::string& payload, 
     TickData& out_tick, 
     OrderBookSnapshot& out_depth,
     TickerData& out_ticker,
-    ExecutionData& out_exec // <--- Новый аргумент
+    ExecutionData& out_exec
 ) {
     simdjson::padded_string json_data(payload);
     
@@ -48,35 +53,27 @@ ParseResultType BybitParser::parse(
             return ParseResultType::None;
         }
         
- // --- 1. EXECUTIONS (НОВАЯ ЛОГИКА) ---
+        // --- 1. EXECUTIONS ---
         if (topic_sv.find("execution") != std::string_view::npos) {
             simdjson::ondemand::array data_arr;
             if (!obj["data"].get(data_arr)) {
                 for (auto exec_val : data_arr) {
                     auto exec_obj = exec_val.get_object();
                     
-                    // Извлекаем данные
                     std::string_view sv;
                     if (!exec_obj["symbol"].get_string().get(sv)) out_exec.symbol = std::string(sv);
                     if (!exec_obj["orderId"].get_string().get(sv)) out_exec.order_id = std::string(sv);
                     if (!exec_obj["side"].get_string().get(sv)) out_exec.side = std::string(sv);
                     
-                    // Цены и объемы
                     if (auto f = exec_obj["execPrice"]; !f.error()) out_exec.exec_price = extract_double(f.value());
                     if (auto f = exec_obj["execQty"]; !f.error()) out_exec.exec_qty = extract_double(f.value());
                     
-                    // Maker/Taker
                     if (auto f = exec_obj["isMaker"]; !f.error()) { 
                         bool val; 
                         if (!f.value().get_bool().get(val)) out_exec.is_maker = val; 
                     }
 
-                    // Время
-                    int64_t ts = 0;
                     if (auto f = exec_obj["execTime"]; !f.error()) {
-                         // В execution топике timestamp часто строка, но simdjson умеет конвертировать,
-                         // если это число. Если строка - используем extract_double и кастуем.
-                         // Для надежности:
                          out_exec.timestamp = (long long)extract_double(f.value());
                     }
 
@@ -85,13 +82,11 @@ ParseResultType BybitParser::parse(
             }
             return ParseResultType::None;
         }
-        // ==========================================
-        // 1. ЛОГИКА ТИКЕРОВ (НОВАЯ)
-        // ==========================================
+
+        // --- 2. TICKERS ---
         if (topic_sv.find("tickers") != std::string_view::npos) {
             simdjson::ondemand::object data_obj;
             
-            // В Bybit V5 Linear ticker -> data это Object, а не Array
             if (obj["data"].get_object().get(data_obj)) {
                  return ParseResultType::None;
             }
@@ -99,22 +94,22 @@ ParseResultType BybitParser::parse(
             std::string_view sym;
             if (!data_obj["symbol"].get_string().get(sym)) out_ticker.symbol = std::string(sym);
             
-            // Извлекаем ключевые метрики для сканера
             if (auto f = data_obj["lastPrice"]; !f.error()) out_ticker.last_price = extract_double(f.value());
             if (auto f = data_obj["turnover24h"]; !f.error()) out_ticker.turnover_24h = extract_double(f.value());
             if (auto f = data_obj["price24hPcnt"]; !f.error()) out_ticker.price_24h_pcnt = extract_double(f.value());
 
-            // Timestamp события
             int64_t ts = 0;
-            if (auto f = obj["ts"]; !f.error()) f.get_int64().get(ts);
+            // FIX: Явное подавление warning unused result
+            if (auto f = obj["ts"]; !f.error()) { 
+                auto _ = f.get_int64().get(ts); 
+                (void)_; 
+            }
             out_ticker.timestamp = ts;
 
             return ParseResultType::Ticker;
         }
 
-        // ==========================================
-        // 2. ЛОГИКА СДЕЛОК (Как было)
-        // ==========================================
+        // --- 3. PUBLIC TRADES ---
         else if (topic_sv.find("publicTrade") != std::string_view::npos) {
             simdjson::ondemand::array data_arr;
             if (!obj["data"].get(data_arr)) {
@@ -124,8 +119,18 @@ ParseResultType BybitParser::parse(
                     
                     if (auto f = trade_obj["p"]; !f.error()) price = extract_double(f.value());
                     if (auto f = trade_obj["v"]; !f.error()) vol = extract_double(f.value());
-                    if (auto f = trade_obj["s"]; !f.error()) { std::string_view sv; f.value().get_string().get(sv); symbol_str = std::string(sv); }
-                    if (auto f = trade_obj["T"]; !f.error()) { int64_t val; if (!f.value().get_int64().get(val)) ts = val; }
+                    
+                    // FIX: Явное подавление warning unused result
+                    if (auto f = trade_obj["s"]; !f.error()) { 
+                        std::string_view sv; 
+                        auto _ = f.value().get_string().get(sv); 
+                        (void)_;
+                        symbol_str = std::string(sv); 
+                    }
+                    if (auto f = trade_obj["T"]; !f.error()) { 
+                        int64_t val; 
+                        if (!f.value().get_int64().get(val)) ts = val; 
+                    }
 
                     if (price > 0) {
                         out_tick = {symbol_str, price, vol, ts};
@@ -135,9 +140,7 @@ ParseResultType BybitParser::parse(
             }
         }
         
-        // ==========================================
-        // 3. ЛОГИКА СТАКАНА (Как было)
-        // ==========================================
+        // --- 4. ORDERBOOK ---
         else if (topic_sv.find("orderbook") != std::string_view::npos) {
             std::string_view type_sv;
             if (obj["type"].get_string().get(type_sv)) return ParseResultType::None;
@@ -153,7 +156,11 @@ ParseResultType BybitParser::parse(
                 if (!data_obj["s"].get_string().get(sym)) out_depth.symbol = std::string(sym);
 
                 int64_t ts = 0;
-                if (auto f = obj["ts"]; !f.error()) f.get_int64().get(ts);
+                // FIX: Явное подавление warning unused result
+                if (auto f = obj["ts"]; !f.error()) {
+                    auto _ = f.get_int64().get(ts);
+                    (void)_;
+                }
                 out_depth.timestamp = ts;
 
                 auto now = std::chrono::system_clock::now();
