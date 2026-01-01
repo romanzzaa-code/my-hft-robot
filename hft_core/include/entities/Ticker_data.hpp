@@ -1,11 +1,15 @@
-// hft_core/include/entities/ticker_data.hpp
 #pragma once
 #include <string>
 
 struct TickerData {
     std::string symbol;
+    double best_bid;
+    double best_ask;
+    double turnover_24h;
+    double volume_24h;
+    
+    // Поля, которые заполняет парсер
     double last_price;
-    double turnover_24h;    // Оборот в валюте котировки (USDT)
-    double price_24h_pcnt;  // Изменение цены за 24ч
+    double price_24h_pcnt;
     long long timestamp;
 };

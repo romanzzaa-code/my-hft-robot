@@ -1,20 +1,20 @@
-// hft_core/include/entities/market_depth.hpp
 #pragma once
-#include <string>
 #include <vector>
+#include <string>
 
-// Легковесная структура для одного уровня цены
 struct PriceLevel {
     double price;
-    double quantity;
+    double qty;
 };
 
-// Снимок стакана (Snapshot)
 struct OrderBookSnapshot {
     std::string symbol;
-    long long timestamp;      // Время биржи (exchange timestamp)
-    long long local_timestamp; // Время получения (local timestamp)
     std::vector<PriceLevel> bids;
     std::vector<PriceLevel> asks;
-    bool is_snapshot;         // true = полный снимок, false = дельта (на будущее)
+    long long timestamp; // Биржевое время
+    long long u;         // Update ID
+    
+    // Поля, которые заполняет парсер
+    long long local_timestamp; 
+    bool is_snapshot;
 };

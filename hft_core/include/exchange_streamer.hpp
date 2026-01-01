@@ -1,35 +1,42 @@
 #pragma once
 #include <string>
+#include <vector>
 #include <functional>
 #include <memory>
 #include <ixwebsocket/IXWebSocket.h>
 #include "entities/tick_data.hpp"
 #include "entities/market_depth.hpp"
-#include "entities/ticker_data.hpp" 
-#include "parsers/imessage_parser.hpp"
 #include "entities/execution_data.hpp"
+#include "parsers/imessage_parser.hpp"
 
 class ExchangeStreamer {
 public:
     ExchangeStreamer(std::shared_ptr<IMessageParser> parser);
     ~ExchangeStreamer();
 
-    void connect(std::string url);
     void start();
     void stop();
-    void send_message(std::string msg);
-    void set_execution_callback(std::function<void(const ExecutionData&)> cb);
+    
+    // Добавляем этот метод, чтобы main.cpp не ругался
+    void add_symbol(const std::string& symbol); 
+
     void set_tick_callback(std::function<void(const TickData&)> cb);
-    void set_depth_callback(std::function<void(const OrderBookSnapshot&)> cb);
-    void set_ticker_callback(std::function<void(const TickerData&)> cb); 
+    
+    // Внимание: называем это set_orderbook_callback, чтобы совпадало с main.cpp
+    // ИЛИ меняем в main.cpp. Давай поменяем тут, это проще.
+    void set_orderbook_callback(std::function<void(const OrderBookSnapshot&)> cb);
+    
+    void set_execution_callback(std::function<void(const ExecutionData&)> cb);
 
 private:
-    ix::WebSocket webSocket;
-    std::shared_ptr<IMessageParser> parser;
+    void on_message(const ix::WebSocketMessagePtr& msg);
     
-    std::function<void(const TickData&)> tick_callback;
-    std::function<void(const OrderBookSnapshot&)> depth_callback;
-    std::function<void(const ExecutionData&)> execution_callback;
-    // 3. ОБЯЗАТЕЛЬНО ОБЪЯВИТЬ ЭТУ ПЕРЕМЕННУЮ
-    std::function<void(const TickerData&)> ticker_callback;
+    ix::WebSocket webSocket;
+    std::shared_ptr<IMessageParser> parser_;
+    std::vector<std::string> symbols_;
+    bool running_ = false;
+
+    std::function<void(const TickData&)> tick_cb_;
+    std::function<void(const OrderBookSnapshot&)> depth_cb_;
+    std::function<void(const ExecutionData&)> exec_cb_;
 };

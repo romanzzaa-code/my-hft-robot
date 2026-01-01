@@ -4,6 +4,7 @@
 struct TickData {
     std::string symbol;
     double price;
-    double volume;
+    double qty;        // Было quantity? Стало qty
     long long timestamp;
+    std::string side;  // Добавили side
 };

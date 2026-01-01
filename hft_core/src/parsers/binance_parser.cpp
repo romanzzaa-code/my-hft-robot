@@ -19,7 +19,7 @@ static double extract_double(simdjson::ondemand::value val) {
         if (sv.empty()) return 0.0;
         
         // FIX: Использование strtod вместо from_chars
-        std::string s(sv);С
+        std::string s(sv);
         char* end;
         double res = std::strtod(s.c_str(), &end);
         return res;

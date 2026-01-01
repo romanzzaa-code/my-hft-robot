@@ -1,273 +1,148 @@
-# hft_strategy/live_bot.py
 import asyncio
 import logging
+import signal
 import sys
-import os
-from typing import Dict, Set
-from dotenv import load_dotenv
+from typing import Optional
 
-# --- PATH HACK (Исправленная версия для Mac/Linux) ---
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)
+# Импорт C++ ядра (убедись, что hft_core.so/pyd виден Python-у)
+import hft_core
 
-# 1. Добавляем корень проекта, чтобы видеть hft_strategy
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-
-# 2. Ищем скомпилированное ядро C++
-# На Windows оно часто в build/Release, на Mac/Linux просто в build
-possible_paths = [
-    os.path.join(project_root, "hft_core", "build", "Release"),
-    os.path.join(project_root, "hft_core", "build"),
-]
-
-core_found = False
-for p in possible_paths:
-    if os.path.exists(p):
-        if p not in sys.path:
-            sys.path.insert(0, p)
-            print(f"🔌 Loaded hft_core from: {p}")
-        core_found = True
-        break
-
-if not core_found:
-    print("⚠️ WARNING: Compiled hft_core not found! Check paths.")
-# -------------------------------------------------------------
-
-import hft_core 
-from hft_strategy.config import TRADING_CONFIG
-from hft_strategy.infrastructure.market_bridge import MarketBridge
+from hft_strategy.config import load_config, Config
 from hft_strategy.infrastructure.execution import BybitExecutionHandler
-from hft_strategy.domain.strategy_config import get_config
+from hft_strategy.services.market_scanner import MarketScanner
 from hft_strategy.strategies.adaptive_live_strategy import AdaptiveWallStrategy
 
-# [NEW] Импортируем наши новые компоненты
-from hft_strategy.infrastructure.db_writer import NullTickWriter
-from hft_strategy.services.smart_scanner import SmartMarketSelector
-
-load_dotenv()
-
-logging.basicConfig(
-    level=logging.INFO, 
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    datefmt="%H:%M:%S"
-)
-# Уменьшаем шум от библиотек
-logging.getLogger("asyncio").setLevel(logging.WARNING)
-logging.getLogger("pybit").setLevel(logging.WARNING)
-
-logger = logging.getLogger("ORCHESTRATOR")
-
-# Конфигурация цикла ротации
-ROTATION_INTERVAL_SEC = 300  # 5 минут
-TOP_COINS_COUNT = 5
+# Настройка логирования
+def setup_logging(config: Config):
+    logging.basicConfig(
+        level=config.log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
 
 class BotOrchestrator:
-    """
-    Управляет жизненным циклом торговых стратегий.
-    Реализует паттерн Orchestrator: выбирает активы, выделяет ресурсы, запускает/останавливает торговлю.
-    """
-    def __init__(self):
-        self.api_key = os.getenv("BYBIT_API_KEY", "")
-        self.api_secret = os.getenv("BYBIT_API_SECRET", "")
+    def __init__(self, config_path: str):
+        self.config = load_config(config_path)
+        setup_logging(self.config)
+        self.logger = logging.getLogger("BotOrchestrator")
         
-        if not self.api_key:
-            logger.warning("⚠️ Running in ANONYMOUS mode (No Trading, just Scanning)")
-
-        # 1. Инфраструктура
-        # Используем NullWriter - запись в БД отключена (Goal 1 achieved)
-        self.db_writer = NullTickWriter()
+        self.running = False
         
-        # Executor (Один экземпляр на всех)
-        self.executor = BybitExecutionHandler(self.api_key, self.api_secret, sandbox=False)
-        
-        # Scanner (Сервис выбора монет)
-        self.scanner = SmartMarketSelector(self.executor)
-        
-        # Очередь событий и Event Loop
-        self.loop = asyncio.get_running_loop()
-        self.shared_queue = asyncio.Queue()
-        
-        # 2. C++ Core Components (WebSockets)
-        self.pub_parser = hft_core.BybitParser()
-        self.pub_streamer = hft_core.ExchangeStreamer(self.pub_parser)
-        
-        # Public Bridge (Market Data)
-        self.public_bridge = MarketBridge(
-            TRADING_CONFIG.ws_url, 
-            self.pub_streamer, 
-            self.loop, 
-            queue=self.shared_queue
-        )
-        
-        # Private Bridge (Executions)
-        self.priv_bridge = None
-        if self.api_key:
-            self.priv_parser = hft_core.BybitParser()
-            self.priv_streamer = hft_core.ExchangeStreamer(self.priv_parser)
-            self.priv_bridge = MarketBridge(
-                TRADING_CONFIG.private_ws_url, 
-                self.priv_streamer, 
-                self.loop, 
-                queue=self.shared_queue
+        # --- 1. Инициализация C++ Order Gateway (НОВОЕ) ---
+        self.logger.info("🔌 Initializing C++ Order Gateway...")
+        try:
+            self.gateway = hft_core.OrderGateway(
+                self.config.api_key, 
+                self.config.api_secret, 
+                self.config.testnet
             )
+            # Устанавливаем коллбек для логов от биржи (ордера, ошибки)
+            self.gateway.set_on_order_update(self._on_gateway_message)
+            self.logger.info("✅ Gateway initialized.")
+        except Exception as e:
+            self.logger.critical(f"❌ Failed to init Gateway: {e}")
+            sys.exit(1)
 
-        # State (Текущий портфель)
-        self.active_strategies: Dict[str, AdaptiveWallStrategy] = {}
-        self.active_symbols: Set[str] = set()
-        self.is_running = True
-
-    async def start_infrastructure(self):
-        """Запуск сетевого слоя"""
-        logger.info("🔌 Starting Infrastructure...")
-        await self.db_writer.start()
-        await self.public_bridge.start()
+        # --- 2. Инициализация Market Data (C++) ---
+        self.logger.info("📡 Initializing Exchange Streamer...")
+        self.streamer = hft_core.ExchangeStreamer(hft_core.BybitParser())
         
-        if self.priv_bridge:
-            await self.priv_bridge.start()
-            self.priv_bridge.authenticate(self.api_key, self.api_secret)
-            self.priv_bridge.subscribe_executions()
+        # --- 3. Legacy Execution Handler (пока оставляем для баланса/позиций) ---
+        self.execution_handler = BybitExecutionHandler(self.config)
+
+        # --- 4. Market Scanner ---
+        self.scanner = MarketScanner(self.execution_handler)
+
+        # --- 5. Стратегия ---
+        # ВАЖНО: Передаем gateway в стратегию
+        self.logger.info(f"🧠 Initializing Strategy for {self.config.symbol}...")
+        self.strategy = AdaptiveWallStrategy(
+            symbol=self.config.symbol,
+            execution_handler=self.execution_handler, # Старый HTTP (для совместимости)
+            gateway=self.gateway,                     # <--- НОВЫЙ C++ ШЛЮЗ
+            config=self.config.strategy
+        )
+
+        # Связываем стример со стратегией
+        self._setup_streamer()
+
+    def _setup_streamer(self):
+        """Настройка коллбеков от C++ к Python"""
+        # Тики
+        self.streamer.set_tick_callback(self.strategy.on_tick)
+        # Стакан
+        self.streamer.set_orderbook_callback(self.strategy.on_depth)
+        # Исполнения (свои сделки) - пока просто логируем или обновляем позицию
+        self.streamer.set_execution_callback(self._on_execution)
+        
+        # Добавляем символ в подписку
+        self.streamer.add_symbol(self.config.symbol)
+
+    def _on_gateway_message(self, msg: str):
+        """Обработка сообщений от OrderGateway (ответы биржи)"""
+        # Тут можно парсить JSON и обновлять состояние ордеров в стратегии
+        # Пока просто выводим для отладки
+        if "error" in msg.lower() and "retCode" not in msg:
+             self.logger.error(f"⚡ GW ERROR: {msg}")
+        else:
+             self.logger.info(f"⚡ GW: {msg}")
+
+    def _on_execution(self, exec_data):
+        self.logger.info(f"💰 EXECUTION: {exec_data.side} {exec_data.qty} @ {exec_data.price}")
+        # Тут можно вызывать self.strategy.update_position(...)
+
+    async def run(self):
+        self.running = True
+        
+        # Обработка сигналов остановки (Ctrl+C)
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
+
+        try:
+            # 1. Подключаем Торговый Шлюз
+            self.logger.info("🔗 Connecting Order Gateway (Trade Stream)...")
+            self.gateway.connect()
             
-        # Запускаем обработчик очереди (Consumer) в фоне
-        asyncio.create_task(self._event_processing_loop())
-
-    async def _event_processing_loop(self):
-        """
-        Единый цикл обработки событий.
-        Читает очередь и маршрутизирует данные в нужную стратегию.
-        """
-        logger.info("🌀 Event Processing Loop Active")
-        while self.is_running:
-            try:
-                # Блокирующее чтение из очереди
-                event = await self.shared_queue.get()
-                
-                # Запись в БД (в данном случае - в пустоту, т.к. NullWriter)
-                await self.db_writer.add_event(event)
-
-                # Маршрутизация (Routing)
-                target_strat = self.active_strategies.get(event.symbol)
-                if target_strat:
-                    evt_type = getattr(event, 'type', 'unknown')
-                    
-                    if evt_type == 'depth':
-                        # Обработка стакана
-                        await target_strat.on_depth(event)
-                    
-                    elif evt_type == 'execution':
-                        # Обработка сделки (Вход/Выход)
-                        await target_strat.on_execution(event)
-                        
-            except Exception as e:
-                logger.error(f"💥 Event Loop Error: {e}", exc_info=True)
-
-    async def rotate_portfolio(self):
-        """
-        Основная логика ротации (Goal 2 achieved).
-        Запрашивает новые монеты, обновляет стратегии и подписки.
-        """
-        logger.info("🔄 --- ROTATION CYCLE START ---")
-        
-        # 1. Smart Selection
-        new_top_symbols = await self.scanner.scan_and_select(top_n=TOP_COINS_COUNT)
-        
-        if not new_top_symbols:
-            logger.warning("⚠️ Scanner found nothing. Holding positions.")
-            return
-
-        new_set = set(new_top_symbols)
-        
-        # 2. Diff Calculation
-        to_add = new_set - self.active_symbols
-        to_remove = self.active_symbols - new_set
-        
-        if not to_add and not to_remove:
-            logger.info("✨ Portfolio is stable. No rotation needed.")
-            return
-
-        logger.info(f"📉 Dropping: {list(to_remove)}")
-        logger.info(f"📈 Adding:   {list(to_add)}")
-
-        # 3. Удаление старых стратегий (Cleanup)
-        for sym in to_remove:
-            if sym in self.active_strategies:
-                # В будущем здесь можно добавить strategy.graceful_stop()
-                del self.active_strategies[sym]
-        
-        self.active_symbols -= to_remove
-
-        # 4. Инициализация новых стратегий (Factory)
-        for sym in to_add:
-            try:
-                # Получаем параметры инструмента (шаг цены, лотность)
-                tick_size, lot_size, min_qty = await self.executor.fetch_instrument_info(sym)
-                
-                cfg = get_config(sym)
-                cfg.tick_size = tick_size
-                cfg.lot_size = lot_size
-                cfg.min_qty = min_qty
-                
-                # Создаем и сохраняем стратегию
-                new_strat = AdaptiveWallStrategy(self.executor, cfg)
-                self.active_strategies[sym] = new_strat
-                logger.info(f"✅ Armed strategy for {sym}")
-                
-            except Exception as e:
-                logger.error(f"❌ Failed to init {sym}: {e}")
-                continue
-
-        # Обновляем кэш активных символов
-        self.active_symbols = set(self.active_strategies.keys())
-
-        # 5. Обновляем подписки Websocket (Bridge сам отпишется от старых и подпишется на новые)
-        if self.active_symbols:
-            await self.public_bridge.sync_heavy_subscriptions(list(self.active_symbols))
-        
-        logger.info(f"Current Portfolio ({len(self.active_symbols)}): {list(self.active_symbols)}")
-
-    async def run_forever(self):
-        """Главный цикл жизни бота"""
-        await self.start_infrastructure()
-        
-        while self.is_running:
-            try:
-                # Запускаем ротацию
-                await self.rotate_portfolio()
-                
-                # Ждем следующего цикла (Sleep interruptible)
-                logger.info(f"💤 Sleeping for {ROTATION_INTERVAL_SEC}s...")
-                for _ in range(ROTATION_INTERVAL_SEC):
-                    if not self.is_running: break
-                    await asyncio.sleep(1)
-                    
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"🔥 Critical Orchestrator Error: {e}", exc_info=True)
-                await asyncio.sleep(60) # Пауза перед рестартом при ошибке
-
-    async def stop(self):
-        """Корректное завершение"""
-        logger.info("🛑 Stopping Orchestrator...")
-        self.is_running = False
-        
-        await self.public_bridge.stop()
-        if self.priv_bridge:
-            await self.priv_bridge.stop()
+            # Ждем 1.5 секунды на соединение и авторизацию (C++ делает это асинхронно)
+            self.logger.info("⏳ Waiting for Gateway Auth...")
+            await asyncio.sleep(1.5) 
             
-        await self.db_writer.stop()
-        logger.info("👋 Shutdown Complete.")
+            # 2. Запускаем Стример Данных
+            self.logger.info("🌊 Starting Data Stream...")
+            self.streamer.start()
 
-async def main():
-    # Windows Selector Fix
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
-    bot = BotOrchestrator()
-    try:
-        await bot.run_forever()
-    except KeyboardInterrupt:
-        await bot.stop()
+            self.logger.info("🚀 BOT STARTED. Press Ctrl+C to stop.")
+            
+            # Основной цикл (Keep Alive)
+            while self.running:
+                await asyncio.sleep(1)
+                
+        except asyncio.CancelledError:
+            self.logger.info("Bot execution cancelled.")
+        except Exception as e:
+            self.logger.exception(f"Unexpected error: {e}")
+        finally:
+            await self.shutdown()
+
+    async def shutdown(self):
+        self.logger.info("🛑 Shutting down...")
+        self.running = False
+        
+        self.logger.info("Killing Streamer...")
+        self.streamer.stop()
+        
+        self.logger.info("Killing Gateway...")
+        self.gateway.stop()
+        
+        self.logger.info("Bye.")
+        # Останавливаем loop
+        loop = asyncio.get_running_loop()
+        loop.stop()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    if len(sys.argv) < 2:
+        print("Usage: python -m hft_strategy.live_bot config.yaml")
+        sys.exit(1)
+        
+    bot = BotOrchestrator(sys.argv[1])
+    asyncio.run(bot.run())
