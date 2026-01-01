@@ -68,3 +68,6 @@ target_include_directories(hft_core PRIVATE src include)
 
 set_target_properties(hft_core PROPERTIES PREFIX "${PYTHON_MODULE_PREFIX}")
 set_target_properties(hft_core PROPERTIES SUFFIX "${PYTHON_MODULE_EXTENSION}")
+
+# --- 5. Установка (ОБЯЗАТЕЛЬНО для pip install) ---
+install(TARGETS hft_core DESTINATION .)

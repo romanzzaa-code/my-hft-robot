@@ -1,0 +1,34 @@
+# pyproject.toml
+
+[build-system]
+# Зависимости для сборки: scikit-build-core (связующее звено) и pybind11
+requires = ["scikit-build-core>=0.5.0", "pybind11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "hft_robot"
+version = "0.1.0"
+description = "High Frequency Trading Bot with C++ Core"
+requires-python = ">=3.10"
+dependencies = [
+    "pybit", 
+    "asyncpg",
+    "orjson",
+    "numpy",
+    "python-dotenv",
+    "pandas",
+    "pytz"
+]
+
+[tool.scikit-build]
+# Указываем, где лежит CMakeLists.txt (в папке hft_core)
+cmake.source-dir = "cpp_src"
+
+# Важно: какие пакеты мы хотим установить в Python. 
+# hft_core (C++ модуль) соберется сам, а hft_strategy (Python код) нужно включить явно.
+# Но так как hft_core лежит отдельно, scikit-build установит его как модуль.
+# Для простоты, мы пока фокусируемся на установке C++ ядра.
+
+[tool.scikit-build.cmake.define]
+# Передаем версию Python в CMake, чтобы не было конфликтов версий
+# scikit-build-core делает это автоматически, но явно указать не вредно.

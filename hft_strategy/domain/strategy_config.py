@@ -1,11 +1,15 @@
 # hft_strategy/domain/strategy_config.py
 from dataclasses import dataclass
-from hft_strategy.config import INVESTMENT_USDT
+
+# --- CONSTANTS (Defaults) ---
+# Перенесли константу сюда, чтобы разорвать круг импортов
+DEFAULT_INVESTMENT_USDT = 20.0 
 
 @dataclass
 class StrategyParameters:
     symbol: str
-    order_amount_usdt: float = INVESTMENT_USDT
+    # Используем локальную константу
+    order_amount_usdt: float = DEFAULT_INVESTMENT_USDT
     tick_size: float = 0.0
     lot_size: float = 0.0
     min_qty: float = 0.0
@@ -31,5 +35,5 @@ class StrategyParameters:
 def get_config(symbol: str) -> StrategyParameters:
     return StrategyParameters(
         symbol=symbol.upper(),
-        order_amount_usdt=INVESTMENT_USDT
+        order_amount_usdt=DEFAULT_INVESTMENT_USDT
     )
