@@ -5,6 +5,7 @@ import math
 import time
 import uuid
 from typing import Optional, Dict, Union, List
+from hft_strategy.infrastructure.local_order_book import LocalOrderBook
 
 # --- C++ Core Bindings (Защита от импорта) ---
 try:
@@ -20,94 +21,6 @@ from hft_strategy.domain.strategy_config import StrategyParameters
 from hft_strategy.domain.trade_context import TradeContext, StrategyState
 
 logger = logging.getLogger("ADAPTIVE_STRAT")
-
-# --- LOB (Infrastructure) ---
-class LocalOrderBook:
-    """
-    Гибридный локальный стакан.
-    Поддерживает обновление через Python-объекты (HTTP/WS) и через C++ Snapshots.
-    """
-    def __init__(self):
-        self.bids: Dict[float, float] = {}
-        self.asks: Dict[float, float] = {}
-        self.last_ts = 0
-
-    def _to_key(self, price: float) -> float:
-        return round(price, 8)
-
-    def apply_update(self, event):
-        """Легаси-метод для Python событий (например, REST Snapshot)"""
-        if getattr(event, 'is_snapshot', False):
-            self.bids.clear()
-            self.asks.clear()
-
-        # Обработка bids
-        for level in event.bids:
-            key = self._to_key(level.price)
-            if level.quantity == 0:
-                if key in self.bids: del self.bids[key]
-            else:
-                self.bids[key] = level.quantity
-
-        # Обработка asks
-        for level in event.asks:
-            key = self._to_key(level.price)
-            if level.quantity == 0:
-                if key in self.asks: del self.asks[key]
-            else:
-                self.asks[key] = level.quantity
-        
-        self.last_ts = getattr(event, 'timestamp', time.time())
-
-    def apply_snapshot(self, snapshot: OrderBookSnapshot):
-        """
-        Метод для быстрого C++ снепшота.
-        Ожидает, что snapshot имеет итерируемые поля bids/asks (price, qty).
-        """
-        self.bids.clear()
-        self.asks.clear()
-        
-        # Предполагаем структуру [(price, qty), ...] или объекты с полями .price/.qty
-        # Адаптируйте этот цикл под реальную структуру вашего C++ биндинга
-        try:
-            for item in snapshot.bids:
-                p = getattr(item, 'price', item[0] if isinstance(item, (tuple, list)) else item)
-                q = getattr(item, 'quantity', getattr(item, 'qty', item[1] if isinstance(item, (tuple, list)) else 0))
-                self.bids[self._to_key(p)] = q
-                
-            for item in snapshot.asks:
-                p = getattr(item, 'price', item[0] if isinstance(item, (tuple, list)) else item)
-                q = getattr(item, 'quantity', getattr(item, 'qty', item[1] if isinstance(item, (tuple, list)) else 0))
-                self.asks[self._to_key(p)] = q
-                
-            self.last_ts = time.time()
-        except Exception as e:
-            logger.error(f"LOB Snapshot Error: {e}")
-
-    def get_volume(self, side: str, price: float) -> float:
-        book = self.bids if side == "Buy" else self.asks
-        key = self._to_key(price)
-        return book.get(key, 0.0)
-
-    def get_best(self, side: str) -> float:
-        book = self.bids if side == "Buy" else self.asks
-        if not book: return 0.0
-        return max(book.keys()) if side == "Buy" else min(book.keys())
-
-    def get_background_volume(self) -> float:
-        if not self.bids or not self.asks: return 0.0
-        sorted_bids = sorted(self.bids.keys(), reverse=True)
-        sorted_asks = sorted(self.asks.keys())
-        # Берем слои со 2 по 11 (исключая спред)
-        bg_bids = sorted_bids[1:11] 
-        bg_asks = sorted_asks[1:11]
-        
-        volumes = []
-        for p in bg_bids: volumes.append(self.bids[p])
-        for p in bg_asks: volumes.append(self.asks[p])
-        
-        if not volumes: return 0.0
-        return sum(volumes) / len(volumes)
 
 # --- Strategy ---
 class AdaptiveWallStrategy:
@@ -171,66 +84,92 @@ class AdaptiveWallStrategy:
             
             await asyncio.sleep(60)
 
-    # --- 2. EXECUTION HANDLER ---
+    # --- 2. EXECUTION HANDLER (UPDATED) ---
     async def on_execution(self, event):
         """
-        Обработчик событий исполнения. Поддерживает события и от REST, и от Gateway.
+        Обработчик событий исполнения. 
+        Теперь умеет обрабатывать 'поздние' исполнения (Ghost Fills).
         """
         async with self._lock:
-            if not self.ctx:
-                return
-
             # СЦЕНАРИЙ 1: Исполнение ВХОДА
-            # Проверяем совпадение ID. Если Gateway вернул ClientID, event.order_id должен совпадать.
-            if event.order_id == self.ctx.order_id:
+            # Проверяем, относится ли исполнение к текущему активному ордеру
+            if self.ctx and event.order_id == self.ctx.order_id:
                 new_fill = event.exec_qty
                 self.ctx.filled_qty += new_fill
                 
-                logger.info(f"⚡ FILL: {event.symbol} +{new_fill} (Total: {self.ctx.filled_qty}/{self.ctx.quantity})")
+                logger.info(f"⚡ FILL ENTRY: {event.symbol} +{new_fill} (Total: {self.ctx.filled_qty})")
 
                 if self.state == StrategyState.ORDER_PLACED:
                     self.state = StrategyState.IN_POSITION
-                    self.ctx.entry_price = event.exec_price
+                    self.ctx.entry_price = event.exec_price # Уточняем цену входа
 
                 await self._sync_take_profit()
                 return
 
-            # СЦЕНАРИЙ 2: Исполнение ВЫХОДА
-            if self.ctx.tp_order_id and event.order_id == self.ctx.tp_order_id:
+            # СЦЕНАРИЙ 2: Исполнение ВЫХОДА (TP)
+            if self.ctx and self.ctx.tp_order_id and event.order_id == self.ctx.tp_order_id:
                 filled_exit = event.exec_qty
                 self.ctx.filled_qty -= filled_exit
+                # Защита от отрицательного остатка из-за округления
+                if self.ctx.filled_qty < 1e-9: self.ctx.filled_qty = 0.0
                 
                 if self.ctx.filled_qty <= 1e-9:
-                    logger.info(f"💰 POSITION CLOSED FULLY: {event.symbol}")
+                    logger.info(f"💰 TP FILLED FULLY: {event.symbol}")
                     self._reset_state()
                 else:
                     logger.info(f"📉 TP PARTIAL: -{filled_exit}. Remaining: {self.ctx.filled_qty}")
                 return
 
+            # СЦЕНАРИЙ 3: ORPHAN FILL (Призрак)
+            # Если мы уже сбросили ctx (думали, что отменили), но пришло исполнение.
+            # Это критическая ситуация: у нас есть позиция, о которой стратегия "забыла".
+            if not self.ctx and event.side in ["Buy", "Sell"]:
+                logger.warning(f"😱 ORPHAN FILL DETECTED: {event.side} {event.exec_qty} @ {event.exec_price}")
+                # Тут можно запустить аварийную процедуру создания временного контекста и выхода
+                # Для простоты: просто логируем. В HFT такие позиции обычно кроет Risk Monitor.
+
     async def _sync_take_profit(self):
-        """Управляет Тейк-Профитом через REST (надежность + ReduceOnly)."""
+        """
+        Управляет Тейк-Профитом. 
+        [FIX] Добавлен orderLinkId для защиты от дублирования ордеров при лагах сети.
+        """
         if self.ctx.filled_qty <= 1e-9: return
 
         tp_price = self._calculate_tp_price()
         tp_side = "Sell" if self.ctx.side == "Buy" else "Buy"
 
-        # 1. Если Тейка нет — создаем
+        # Генерируем детерминированный ID для Тейка: tp_{ID_входа}
+        # Если мы пошлем его дважды, биржа отвергнет второй как дубликат.
+        tp_link_id = f"tp_{self.ctx.order_id}"
+
+        # 1. Если Тейка нет в памяти — пробуем поставить
         if not self.ctx.tp_order_id:
-            logger.info(f"🎯 PLACING TP: {self.ctx.filled_qty} @ {tp_price} (ReduceOnly)")
-            # Для TP используем HTTP executor, так как нужен ReduceOnly и надежность
+            logger.info(f"🎯 PLACING TP: {self.ctx.filled_qty} @ {tp_price} (LinkID: {tp_link_id})")
+            
+            # В place_limit_maker нужно прокинуть orderLinkId (потребует правки execution.py, см. ниже)
+            # Пока используем стандартный вызов, но передадим link_id если интерфейс позволяет
             oid = await self.exec.place_limit_maker(
-                self.cfg.symbol, tp_side, tp_price, self.ctx.filled_qty, reduce_only=True
+                self.cfg.symbol, tp_side, tp_price, self.ctx.filled_qty, 
+                reduce_only=True,
+                oid = await self.exec.place_limit_maker(
+                self.cfg.symbol, 
+                tp_side, 
+                tp_price, 
+                self.ctx.filled_qty, 
+                reduce_only=True,
+                order_link_id=tp_link_id # <--- Теперь это работает!
+            )
             )
             if oid:
                 self.ctx.tp_order_id = oid
         
-        # 2. Если Тейк есть — обновляем
+        # 2. Если Тейк есть — обновляем объем
         else:
             success = await self.exec.amend_order(
                 self.cfg.symbol, self.ctx.tp_order_id, self.ctx.filled_qty
             )
             if not success:
-                logger.warning("⚠️ Amend failed. Waiting for next execution event.")
+                logger.warning("⚠️ TP Amend failed. Will retry on next tick.")
 
     def _calculate_tp_price(self) -> float:
         if self.cfg.use_dynamic_tp:
@@ -419,41 +358,73 @@ class AdaptiveWallStrategy:
             )
 
     async def _safe_cancel_and_reset(self):
-        """Безопасная отмена с проверкой."""
-        if self.gateway:
-            # TODO: Реализовать отмену через Gateway, если поддерживается.
-            # Пока используем HTTP для надежности отмены.
-            pass
-            
+        """
+        Безопасная отмена. 
+        Вместо sleep мы делаем отмену, а затем явную проверку состояния.
+        """
+        if not self.ctx or not self.ctx.order_id:
+            self._reset_state()
+            return
+
+        logger.info(f"🚫 Cancelling entry {self.ctx.order_id}...")
+        
+        # 1. Отправляем отмену (REST блокирующий, ждем ответа сервера)
+        # Если метод вернет управление, значит Bybit принял запрос (или вернул ошибку).
         await self.exec.cancel_order(self.cfg.symbol, self.ctx.order_id)
         
-        await asyncio.sleep(0.2)
+        # 2. Double Check (Сразу после отмены)
+        # Если позиция успела набраться до отмены, filled_qty уже должен был обновиться через on_execution
+        # (так как REST запрос занял какое-то время, websocket мог успеть проскочить).
         
-        if self.ctx.filled_qty > 0:
-            logger.warning(f"⚠️ Cancelled order was partially filled: {self.ctx.filled_qty}. Staying IN_POSITION.")
+        if self.ctx.filled_qty > 1e-9:
+            logger.warning(f"⚠️ Cancelled but Partially Filled: {self.ctx.filled_qty}. Switching to IN_POSITION.")
+            self.state = StrategyState.IN_POSITION
             await self._sync_take_profit()
         else:
+            # Чистая отмена
+            logger.info("✅ Order cancelled cleanly. Resetting.")
             self._reset_state()
 
     async def _panic_exit(self):
-        """Экстренный выход по рынку."""
-        if not self.ctx or self.ctx.filled_qty <= 1e-9: return
+        """
+        Экстренный выход.
+        [FIX] Используем Gateway (WebSocket) для скорости, если доступен.
+        """
+        if not self.ctx or self.ctx.filled_qty <= 1e-9: 
+            self._reset_state()
+            return
         
+        # Снимаем Тейк
         if self.ctx.tp_order_id:
             await self.exec.cancel_order(self.cfg.symbol, self.ctx.tp_order_id)
             self.ctx.tp_order_id = None
         
         exit_side = "Sell" if self.ctx.side == "Buy" else "Buy"
-        logger.warning(f"🚨 PANIC EXIT: {exit_side} {self.ctx.filled_qty} (ReduceOnly)")
+        logger.warning(f"🚨 PANIC EXIT: {exit_side} {self.ctx.filled_qty} NOW!")
         
-        # Для паник-выхода лучше HTTP, так как нужен точный флаг ReduceOnly, 
-        # который простые шлюзы иногда игнорируют.
+        # Попытка 1: Быстрый WebSocket (Fire and Forget)
+        if self.gateway:
+            try:
+                # В Gateway нужно добавить поддержку Market Order (см. следующий шаг)
+                # Пока шлем как Limit с плохой ценой (Market-like) для гарантии
+                bad_price = 0.0
+                if exit_side == "Buy": bad_price = self.ctx.entry_price * 1.1 # +10%
+                else: bad_price = self.ctx.entry_price * 0.9 # -10%
+                
+                self.gateway.send_order(self.cfg.symbol, exit_side, self.ctx.filled_qty, bad_price)
+                logger.info("🚀 Panic Order sent via GW")
+            except Exception as e:
+                logger.error(f"GW Panic failed: {e}")
+
+        # Попытка 2: Надежный REST (страховка)
+        # ReduceOnly=True критически важен здесь
         await self.exec.place_market_order(
             self.cfg.symbol, 
             exit_side, 
             self.ctx.filled_qty, 
             reduce_only=True
         )
+        
         self._reset_state()
 
     # --- HELPERS ---

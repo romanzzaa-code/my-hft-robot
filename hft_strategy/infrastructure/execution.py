@@ -77,10 +77,21 @@ class BybitExecutionHandler:
         return []
 
     # [UPDATE] Добавлен аргумент reduce_only
-    async def place_market_order(self, symbol: str, side: str, qty: float, reduce_only: bool = False) -> Optional[str]:
+    async def place_market_order(
+        self, 
+        symbol: str, 
+        side: str, 
+        qty: float, 
+        reduce_only: bool = False,
+        order_link_id: Optional[str] = None # <--- NEW
+    ) -> Optional[str]:
+        
+        # Генерация дефолтного ID, если не передан
+        link_id = order_link_id or f"panic_{int(asyncio.get_running_loop().time()*1000)}"
+
         if self.read_only:
-            logger.info(f"🕶️ [SIM] MARKET {side} {qty} (RO={reduce_only}) on {symbol}")
-            return f"sim_market_{int(asyncio.get_running_loop().time())}"
+            logger.info(f"🕶️ [SIM] MARKET {side} {qty} (RO={reduce_only}, ID={link_id}) on {symbol}")
+            return f"sim_market_{link_id}"
 
         try:
             loop = asyncio.get_running_loop()
@@ -90,8 +101,8 @@ class BybitExecutionHandler:
                 side=side.capitalize(),
                 orderType="Market",
                 qty=self._fmt(qty),
-                reduceOnly=reduce_only,  # <--- Передаем в API
-                orderLinkId=f"panic_{int(loop.time()*1000)}"
+                reduceOnly=reduce_only,
+                orderLinkId=link_id  # <--- ПЕРЕДАЕМ В API
             ))
             oid = result['result']['orderId']
             logger.warning(f"🚨 MARKET {side} {qty} EXECUTED on {symbol} | ID: {oid}")
@@ -101,10 +112,21 @@ class BybitExecutionHandler:
             return None
 
     # [UPDATE] Добавлен аргумент reduce_only
-    async def place_limit_maker(self, symbol: str, side: str, price: float, qty: float, reduce_only: bool = False) -> Optional[str]:
+    async def place_limit_maker(
+        self, 
+        symbol: str, 
+        side: str, 
+        price: float, 
+        qty: float, 
+        reduce_only: bool = False,
+        order_link_id: Optional[str] = None # <--- NEW
+    ) -> Optional[str]:
+        
+        link_id = order_link_id or f"hft_{int(asyncio.get_running_loop().time()*1000)}"
+
         if self.read_only:
-            logger.info(f"🕶️ [SIM] PLACING {side} {qty} @ {price} (RO={reduce_only}) on {symbol}")
-            return f"sim_oid_{int(asyncio.get_running_loop().time())}"
+            logger.info(f"🕶️ [SIM] PLACING {side} {qty} @ {price} (RO={reduce_only}, ID={link_id}) on {symbol}")
+            return f"sim_oid_{link_id}"
 
         try:
             loop = asyncio.get_running_loop()
@@ -116,8 +138,8 @@ class BybitExecutionHandler:
                 qty=self._fmt(qty),
                 price=self._fmt(price),
                 timeInForce="PostOnly", 
-                reduceOnly=reduce_only, # <--- Передаем в API
-                orderLinkId=f"hft_{int(loop.time()*1000)}"
+                reduceOnly=reduce_only,
+                orderLinkId=link_id  # <--- ПЕРЕДАЕМ В API
             ))
             oid = result['result']['orderId']
             logger.info(f"✅ ORDER PLACED: {symbol} {side} {qty} @ {price} | ID: {oid}")
