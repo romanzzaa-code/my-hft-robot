@@ -40,6 +40,7 @@ class BotOrchestrator:
         self.logger = logging.getLogger("BotOrchestrator")
         
         self.running = False
+        self.loop = None
         
         # Словарь для хранения стратегий: Symbol -> StrategyInstance
         self.strategies: Dict[str, AdaptiveWallStrategy] = {}
@@ -87,16 +88,25 @@ class BotOrchestrator:
     # --- ROUTING DISPATCHERS (Маршрутизаторы) ---
     def _dispatch_tick(self, tick):
         if tick.symbol in self.strategies:
+            # Тики обрабатываем синхронно (это быстро)
             self.strategies[tick.symbol].on_tick(tick)
 
     def _dispatch_depth(self, snapshot):
-        if snapshot.symbol in self.strategies:
-            asyncio.create_task(self.strategies[snapshot.symbol].on_depth(snapshot))
+        if snapshot.symbol in self.strategies and self.loop:
+            # ПЕРЕБРАСЫВАЕМ В ГЛАВНЫЙ ПОТОК ЧЕРЕЗ threadsafe
+            asyncio.run_coroutine_threadsafe(
+                self.strategies[snapshot.symbol].on_depth(snapshot),
+                self.loop
+            )
 
     def _dispatch_execution(self, exec_data):
-        if exec_data.symbol in self.strategies:
-            asyncio.create_task(self.strategies[exec_data.symbol].on_execution(exec_data))
-
+        if exec_data.symbol in self.strategies and self.loop:
+            # ПЕРЕБРАСЫВАЕМ В ГЛАВНЫЙ ПОТОК ЧЕРЕЗ threadsafe
+            asyncio.run_coroutine_threadsafe(
+                self.strategies[exec_data.symbol].on_execution(exec_data),
+                self.loop
+            )
+            
     def _setup_streamer_routing(self):
         self.streamer.set_tick_callback(self._dispatch_tick)
         self.streamer.set_orderbook_callback(self._dispatch_depth)
@@ -200,7 +210,7 @@ class BotOrchestrator:
     async def run(self):
         self.running = True
         
-        loop = asyncio.get_running_loop()
+        self.loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
 
