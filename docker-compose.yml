@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+  # --- База данных (оставляем как было) ---
   timescaledb:
     image: timescale/timescaledb:latest-pg14
     container_name: hft_db
@@ -9,8 +10,6 @@ services:
       - POSTGRES_PASSWORD=password
       - POSTGRES_USER=hft_user
       - POSTGRES_DB=hft_data
-    ports:
-      - "5432:5432"
     volumes:
       - ./timescaledb_data:/var/lib/postgresql/data
     healthcheck:
@@ -19,7 +18,18 @@ services:
       timeout: 5s
       retries: 5
 
-  # Добавим удобный UI для просмотра базы (опционально, но полезно)
+  # --- Твой робот (Добавляем!) ---
+  bot:
+    build: .             # Строим из текущей папки
+    container_name: hft_bot
+    restart: always      # Перезапускаем при ошибках
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    env_file:
+      - .env             # Берем ключи из .env файла
+    network_mode: "service:timescaledb" # Или networks: [default], если база в одной сети
+
   pgadmin:
     image: dpage/pgadmin4
     container_name: hft_pgadmin

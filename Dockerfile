@@ -1,23 +1,25 @@
-# Используем официальный образ Python 3.11 с оптимизациями
+# Dockerfile
 FROM python:3.11-slim
 
-# Устанавливаем компиляторы и CMake (для сборки C++ модуля)
+# Ставим инструменты для сборки C++ (gcc, cmake)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    gcc g++ cmake make pkg-config git wget curl && \
+    apt-get install -y gcc g++ cmake make git && \
     rm -rf /var/lib/apt/lists/*
 
-# Устанавливаем pybind11 через pip (будет использоваться для биндингов)
-RUN pip install pybind11
-
-# Копируем всю папку проекта внутрь контейнера (кроме .git и .dockerignore)
-COPY . /app
-
-# Переходим в папку проекта
 WORKDIR /app
 
-# Устанавливаем зависимости Python (если будут)
-# RUN pip install -r requirements.txt
+# Сначала копируем зависимости (для кэширования)
+COPY requirements.txt .
+COPY pyproject.toml .
 
-# Команда по умолчанию — просто показать, что всё работает
-CMD ["python", "-c", "print('✅ Dockerfile работает!')"]
+# Устанавливаем библиотеки Python
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копируем весь код проекта
+COPY . .
+
+# Компилируем C++ ядро (hft_core)
+RUN pip install .
+
+# Запускаем робота
+CMD ["python", "-u", "hft_strategy/live_bot.py"]
