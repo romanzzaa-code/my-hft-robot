@@ -106,7 +106,7 @@ class BotOrchestrator:
                 self.strategies[exec_data.symbol].on_execution(exec_data),
                 self.loop
             )
-            
+
     def _setup_streamer_routing(self):
         self.streamer.set_tick_callback(self._dispatch_tick)
         self.streamer.set_orderbook_callback(self._dispatch_depth)
@@ -212,7 +212,7 @@ class BotOrchestrator:
         
         self.loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
+            self.loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
 
         try:
             # Настройка роутинга
