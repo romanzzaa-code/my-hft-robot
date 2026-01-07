@@ -7,6 +7,16 @@
 #include <nlohmann/json.hpp>
 #include <ixwebsocket/IXNetSystem.h>
 
+// Хелпер для форматирования чисел (убирает 1e-05)
+std::string format_decimal(double value, int precision = 8) {
+    std::stringstream ss;
+    ss << std::fixed << std::setprecision(precision) << value;
+    std::string s = ss.str();
+    s.erase(s.find_last_not_of('0') + 1, std::string::npos);
+    if (s.back() == '.') s.pop_back();
+    return s;
+}
+
 std::string hmac_sha256(const std::string& key, const std::string& data) {
     unsigned char* digest;
     unsigned int len = 0;
@@ -70,10 +80,12 @@ void OrderGateway::authenticate() {
 void OrderGateway::send_order(
     const std::string& symbol, const std::string& side, double qty, double price,
     const std::string& order_link_id, const std::string& order_type,
-    const std::string& time_in_force, bool reduce_only
+    const std::string& time_in_force, bool reduce_only,
+    double stop_loss,
+    double take_profit
 ) {
     if (!authenticated_) {
-        std::cerr << "[C++] ERROR: Cannot send order - Wait for Auth!" << std::endl;
+        std::cerr << "[C++] ERROR: Wait for Auth!" << std::endl;
         return;
     }
 
@@ -82,18 +94,32 @@ void OrderGateway::send_order(
     order["symbol"] = symbol;
     order["side"] = side; 
     order["orderType"] = order_type;
-    order["qty"] = std::to_string(qty); 
+    order["qty"] = format_decimal(qty); 
+    order["positionIdx"] = 0; // Fix One-Way Mode
     
-    // Для рыночных ордеров цена может быть пустой
+    // Включаем Partial для поддержки лимитных тейков
+    order["tpslMode"] = "Partial";
+
     if (order_type == "Limit") {
-        order["price"] = std::to_string(price);
+        order["price"] = format_decimal(price);
     }
 
+    if (!order_link_id.empty()) order["orderLinkId"] = order_link_id;
     order["timeInForce"] = time_in_force;
-    order["reduceOnly"] = reduce_only; // Передаем флаг в API
+    order["reduceOnly"] = reduce_only;
 
-    if (!order_link_id.empty()) {
-        order["orderLinkId"] = order_link_id; // Критично для on_execution
+    // Атомарный Стоп (Рыночный)
+    if (stop_loss > 0) {
+        order["stopLoss"] = format_decimal(stop_loss);
+        order["slOrderType"] = "Market";
+    }
+
+    // Атомарный Тейк (Лимитный)
+    if (take_profit > 0) {
+        std::string tp_str = format_decimal(take_profit);
+        order["takeProfit"] = tp_str;
+        order["tpOrderType"] = "Limit";
+        order["tpLimitPrice"] = tp_str;
     }
 
     nlohmann::json msg;
@@ -116,32 +142,23 @@ void OrderGateway::cancel_order(const std::string& symbol, const std::string& or
 
 void OrderGateway::on_message(const ix::WebSocketMessagePtr& msg) {
     if (msg->type == ix::WebSocketMessageType::Open) {
-        std::cout << "[C++] Trade Stream Connected. Sending Auth..." << std::endl;
+        std::cout << "[C++] Trade Stream Connected. Authenticating..." << std::endl;
         authenticate();
     } 
     else if (msg->type == ix::WebSocketMessageType::Message) {
         try {
             auto j = nlohmann::json::parse(msg->str);
-            
-            // [CRITICAL FIX] Поддержка обоих форматов ответа (success: true ИЛИ retCode: 0)
             if (j.contains("op") && j["op"] == "auth") {
                 bool ok_bool = j.value("success", false);
                 int ret_code = j.value("retCode", -1);
-                
                 if (ok_bool || ret_code == 0) {
                     authenticated_ = true;
-                    std::cout << "[C++] ✅ AUTH SUCCESS! Ready to trade." << std::endl;
+                    std::cout << "[C++] ✅ AUTH SUCCESS!" << std::endl;
                 } else {
                     std::cerr << "[C++] ❌ AUTH FAILED: " << msg->str << std::endl;
                 }
             }
-            
-            if (on_order_update_cb_) {
-                on_order_update_cb_(msg->str);
-            }
+            if (on_order_update_cb_) on_order_update_cb_(msg->str);
         } catch (...) {}
-    }
-    else if (msg->type == ix::WebSocketMessageType::Error) {
-        std::cerr << "[C++] WS Error: " << msg->errorInfo.reason << std::endl;
     }
 }

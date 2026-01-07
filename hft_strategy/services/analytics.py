@@ -10,7 +10,7 @@ logger = logging.getLogger("ANALYTICS")
 class MarketAnalytics:
     """
     Сервис мониторинга волатильности и фоновых объемов.
-    Освобождает стратегию от циклов запроса свечей.
+    Освобождает стратегию от циклов запроса свечей и математики цен.
     """
     def __init__(self, executor: IExecutionHandler, cfg: StrategyParameters):
         self.exec = executor
@@ -43,11 +43,45 @@ class MarketAnalytics:
             alpha = self.cfg.vol_ema_alpha
             self.avg_background_vol = alpha * current_bg_vol + (1 - alpha) * self.avg_background_vol
 
+    def calculate_exits(self, side: str, entry_price: float, wall_price: float) -> tuple[float, float]:
+        """
+        Рассчитывает цены Take Profit и Stop Loss на основе текущей волатильности (NATR).
+        Возвращает: (tp_price, sl_price)
+        """
+        tick = self.cfg.tick_size
+        if tick <= 0: tick = 0.01 
+        
+        # 1. Расчет Тейка (на основе динамического % из волатильности)
+        target_pct = self.current_tp_pct
+        
+        if side == "Buy":
+            raw_tp = entry_price * (1 + target_pct / 100)
+            # Стоп для лонга: на 1 тик ниже стены
+            raw_sl = wall_price - tick
+        else: # Sell
+            raw_tp = entry_price * (1 - target_pct / 100)
+            # Стоп для шорта: на 1 тик выше стены
+            raw_sl = wall_price + tick
+
+        # 2. Округление до шага цены
+        tp_price = round(round(raw_tp / tick) * tick, 8)
+        sl_price = round(round(raw_sl / tick) * tick, 8)
+        
+        # 3. Санитарная проверка (чтобы Тейк не был слишком близко)
+        min_dist = 5 * tick
+        dist = abs(tp_price - entry_price)
+        
+        if dist < min_dist:
+            if side == "Buy": tp_price = entry_price + min_dist
+            else: tp_price = entry_price - min_dist
+            tp_price = round(tp_price, 8)
+
+        return tp_price, sl_price
+
     async def _volatility_loop(self):
         """Фоновый цикл расчета ATR"""
         while self._running:
             try:
-                # Запрашиваем свечи через интерфейс исполнителя
                 klines = await self.exec.fetch_ohlc(
                     self.cfg.symbol, 
                     interval="5", 
@@ -58,7 +92,6 @@ class MarketAnalytics:
                     await asyncio.sleep(60)
                     continue
                 
-                # Расчет ATR (Average True Range)
                 trs = []
                 for i in range(len(klines) - 1):
                     curr, prev = klines[i], klines[i+1]
@@ -72,10 +105,8 @@ class MarketAnalytics:
                 atr = sum(trs) / len(trs)
                 current_close = klines[0]['c']
                 
-                # NATR в процентах
                 natr = (atr / current_close) * 100 if current_close > 0 else 0
                 
-                # Обновляем целевой тейк-профит
                 self.current_tp_pct = max(
                     natr * self.cfg.tp_natr_multiplier, 
                     self.cfg.min_tp_percent

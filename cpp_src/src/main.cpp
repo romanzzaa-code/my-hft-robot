@@ -2,7 +2,7 @@
 #include <pybind11/functional.h>
 #include <pybind11/stl.h> 
 #include "exchange_streamer.hpp"
-#include "order_gateway.hpp" // <--- ВАЖНО: Добавили хедер шлюза
+#include "order_gateway.hpp"
 #include "parsers/bybit_parser.hpp"
 #include "entities/tick_data.hpp"
 #include "entities/execution_data.hpp"
@@ -68,15 +68,12 @@ PYBIND11_MODULE(hft_core, m) {
 
     // --- OrderGateway (НОВОЕ) ---
     py::class_<OrderGateway>(m, "OrderGateway")
-        // Конструктор: api_key, api_secret, testnet
         .def(py::init<std::string, std::string, bool>(), 
              py::arg("api_key"), py::arg("api_secret"), py::arg("testnet") = false)
-        
-        // Методы управления соединением (отпускаем GIL, чтобы не блокировать Python)
         .def("connect", &OrderGateway::connect, py::call_guard<py::gil_scoped_release>())
         .def("stop", &OrderGateway::stop, py::call_guard<py::gil_scoped_release>())
         
-        // Торговые методы (КРИТИЧНО: gil_scoped_release для скорости)
+        // ОБНОВЛЕННЫЙ МЕТОД
         .def("send_order", &OrderGateway::send_order, 
              py::call_guard<py::gil_scoped_release>(),
              py::arg("symbol"),
@@ -86,17 +83,15 @@ PYBIND11_MODULE(hft_core, m) {
              py::arg("order_link_id") = "",
              py::arg("order_type") = "Limit",
              py::arg("time_in_force") = "PostOnly",
-             py::arg("reduce_only") = false
+             py::arg("reduce_only") = false,
+             py::arg("stop_loss") = 0.0,   // <---
+             py::arg("take_profit") = 0.0  // <---
         )     
-             
         .def("cancel_order", &OrderGateway::cancel_order, 
              py::call_guard<py::gil_scoped_release>(),
              py::arg("symbol"), py::arg("order_id"))
-        
-        // Коллбек для ответов биржи
         .def("set_on_order_update", [](OrderGateway &self, std::function<void(const std::string&)> cb) {
             self.set_on_order_update([cb](const std::string& msg) {
-                // ВНИМАНИЕ: Захватываем GIL, так как входим в контекст Python
                 py::gil_scoped_acquire acquire; 
                 cb(msg);
             });

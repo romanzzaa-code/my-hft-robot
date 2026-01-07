@@ -102,6 +102,7 @@ class BybitExecutionHandler:
                 orderType="Market",
                 qty=self._fmt(qty),
                 reduceOnly=reduce_only,
+                positionIdx=0,
                 orderLinkId=link_id  # <--- ПЕРЕДАЕМ В API
             ))
             oid = result['result']['orderId']
@@ -119,28 +120,45 @@ class BybitExecutionHandler:
         price: float, 
         qty: float, 
         reduce_only: bool = False,
-        order_link_id: Optional[str] = None # <--- NEW
+        order_link_id: Optional[str] = None,
+        stop_loss: Optional[float] = None, # <---
+        take_profit: Optional[float] = None # <---
     ) -> Optional[str]:
         
         link_id = order_link_id or f"hft_{int(asyncio.get_running_loop().time()*1000)}"
 
         if self.read_only:
-            logger.info(f"🕶️ [SIM] PLACING {side} {qty} @ {price} (RO={reduce_only}, ID={link_id}) on {symbol}")
+            logger.info(f"🕶️ [SIM] LIMIT {side} {qty} @ {price} (TP={take_profit}, SL={stop_loss})")
             return f"sim_oid_{link_id}"
 
         try:
+            params = {
+                "category": self.category,
+                "symbol": symbol,
+                "side": side.capitalize(),
+                "orderType": "Limit",
+                "qty": self._fmt(qty),
+                "price": self._fmt(price),
+                "timeInForce": "PostOnly",
+                "reduceOnly": reduce_only,
+                "orderLinkId": link_id,
+                "positionIdx": 0, # Обязательно 0 для One-Way
+                
+                # [КРИТИЧНО] Partial режим нужен для Лимитных Тейков
+                "tpslMode": "Partial"
+            }
+            
+            if stop_loss:
+                params["stopLoss"] = self._fmt(stop_loss)
+                params["slOrderType"] = "Market" # Стоп всегда рыночный для надежности
+
+            if take_profit:
+                params["takeProfit"] = self._fmt(take_profit)
+                params["tpOrderType"] = "Limit" # Тейк лимитный (Maker)
+                params["tpLimitPrice"] = self._fmt(take_profit)
+
             loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(None, lambda: self.client.place_order(
-                category=self.category,
-                symbol=symbol,
-                side=side.capitalize(),
-                orderType="Limit",
-                qty=self._fmt(qty),
-                price=self._fmt(price),
-                timeInForce="PostOnly", 
-                reduceOnly=reduce_only,
-                orderLinkId=link_id  # <--- ПЕРЕДАЕМ В API
-            ))
+            result = await loop.run_in_executor(None, lambda: self.client.place_order(**params))
             oid = result['result']['orderId']
             logger.info(f"✅ ORDER PLACED: {symbol} {side} {qty} @ {price} | ID: {oid}")
             return oid
