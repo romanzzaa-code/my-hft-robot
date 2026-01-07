@@ -115,22 +115,30 @@ class TradeManager:
         try:
             await self.exec.cancel_order(self.cfg.symbol, self.ctx.order_id)
             
+            # Если отмена прошла штатно (ордер еще висел):
             if self.ctx.filled_qty <= 1e-9:
                 self.reset()
             else:
-                # Если успело налить - переходим в позицию (TP уже стоит!)
+                # Частичное исполнение успело прилететь
                 self.state = StrategyState.IN_POSITION
 
         except Exception as e:
             err_str = str(e)
+            # [FIXED LOGIC] Теперь этот блок будет работать!
             # Если ордер исчез — считаем, что он исполнился (Гонка)
             if "110001" in err_str or "Order not exists" in err_str:
                 logger.warning(f"🏎️ RACE CONDITION! Speculative fill for {self.cfg.symbol}")
+                
+                # Принудительно переводим в позицию
                 self.state = StrategyState.IN_POSITION
+                
+                # Если вебсокет еще не прислал execution, доверяем пессимистичному сценарию:
+                # Считаем, что налили ВСЁ.
                 if self.ctx.filled_qty <= 1e-9:
                     self.ctx.filled_qty = self.ctx.quantity
+                    logger.info(f"👻 Ghost Fill Assumption: {self.ctx.filled_qty} lots")
             else:
-                logger.error(f"❌ Cancel Failed: {e}")
+                logger.error(f"❌ Cancel Failed completely: {e}")
 
     async def panic_exit(self):
         """Экстренный выход по рынку (если стену проели)"""

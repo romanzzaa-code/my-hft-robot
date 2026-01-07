@@ -191,6 +191,8 @@ class BybitExecutionHandler:
             logger.warning(f"⚠️ Amend failed: {e}")
             return False
 
+    # hft_strategy/infrastructure/execution.py
+
     async def cancel_order(self, symbol: str, order_id: str):
         if self.read_only:
             logger.info(f"🕶️ [SIM] CANCEL {order_id} on {symbol}")
@@ -206,10 +208,15 @@ class BybitExecutionHandler:
             logger.info(f"🗑️ CANCELLED: {order_id} on {symbol}")
         except Exception as e:
             str_e = str(e)
+            # [CRITICAL FIX] Не глотаем ошибку молча! 
+            # Мы пробрасываем её наверх, чтобы TradeManager понял, что ордера НЕТ.
             if "110001" in str_e or "Order not exists" in str_e:
-                logger.info(f"ℹ️ Cancel skipped (Order gone): {order_id}")
+                # Можно создать кастомное исключение, но пока хватит и re-raise
+                logger.warning(f"⚠️ Cancel failed (Order missing): {order_id}. Escalating to Manager.")
+                raise e 
             else:
                 logger.error(f"❌ Cancel Failed: {e}")
+                raise e
 
     async def get_position(self, symbol: str) -> float:
         if self.read_only: return 0.0

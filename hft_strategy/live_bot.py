@@ -129,7 +129,23 @@ class BotOrchestrator:
         strat_cfg = copy.copy(self.config.strategy)
         strat_cfg.symbol = symbol
         
-        # 2. Создаем стратегию
+        # [FIX] ЗАПРАШИВАЕМ СПЕЦИФИКАЦИЮ С БИРЖИ
+        try:
+            # Получаем реальный шаг цены и лота
+            tick_size, step_size, min_qty = await self.execution_handler.fetch_instrument_info(symbol)
+            
+            # Обновляем конфиг стратегии
+            strat_cfg.tick_size = tick_size
+            strat_cfg.lot_size = step_size
+            strat_cfg.min_qty = min_qty
+            
+            self.logger.info(f"📏 {symbol} Specs: Tick={tick_size}, Lot={step_size}")
+            
+        except Exception as e:
+            self.logger.error(f"❌ Failed to fetch specs for {symbol}: {e}")
+            return # Не запускаем стратегию с кривым конфигом
+        
+        # 2. Создаем стратегию (теперь с правильным tick_size)
         strategy = AdaptiveWallStrategy(
             executor=self.execution_handler,
             cfg=strat_cfg,
@@ -139,8 +155,7 @@ class BotOrchestrator:
         # 3. Регистрируем
         self.strategies[symbol] = strategy
         
-        # 4. Подписываем на стрим (C++)
-        # ВАЖНО: exchange_streamer должен поддерживать add_symbol
+        # 4. Подписываем на стрим
         self.streamer.add_symbol(symbol)
 
     async def _deactivate_strategy(self, symbol: str):

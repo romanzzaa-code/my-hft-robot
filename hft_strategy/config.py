@@ -93,7 +93,7 @@ def load_config(path: str = None) -> Config:
         api_secret=api_secret or "",
         testnet=False, # Или os.getenv("BYBIT_TESTNET", "False").lower() == "true"
         symbol=symbol,
-        log_level="DEBUG",
+        log_level="INFO",
         strategy=strategy_params
     )
 

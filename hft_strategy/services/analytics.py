@@ -10,13 +10,11 @@ logger = logging.getLogger("ANALYTICS")
 class MarketAnalytics:
     """
     Сервис мониторинга волатильности и фоновых объемов.
-    Освобождает стратегию от циклов запроса свечей и математики цен.
     """
     def __init__(self, executor: IExecutionHandler, cfg: StrategyParameters):
         self.exec = executor
         self.cfg = cfg
         
-        # Состояние метрик
         self.current_tp_pct = cfg.min_tp_percent
         self.avg_background_vol = 0.0
         self.is_initialized = False
@@ -24,7 +22,6 @@ class MarketAnalytics:
         self._running = False
 
     async def start(self):
-        """Запуск фонового мониторинга волатильности"""
         self._running = True
         asyncio.create_task(self._volatility_loop())
         logger.info(f"🌊 MarketAnalytics started for {self.cfg.symbol}")
@@ -33,7 +30,6 @@ class MarketAnalytics:
         self._running = False
 
     def update_background_volume(self, current_bg_vol: float):
-        """Расчет EMA объема (вызывается из стратегии при каждом апдейте стакана)"""
         if current_bg_vol <= 0: return
         
         if not self.is_initialized:
@@ -45,36 +41,43 @@ class MarketAnalytics:
 
     def calculate_exits(self, side: str, entry_price: float, wall_price: float) -> tuple[float, float]:
         """
-        Рассчитывает цены Take Profit и Stop Loss на основе текущей волатильности (NATR).
-        Возвращает: (tp_price, sl_price)
+        Рассчитывает TP (динамический) и SL (строго за стеной).
         """
         tick = self.cfg.tick_size
-        if tick <= 0: tick = 0.01 
+        if tick <= 0: tick = 0.0001 # Fallback
         
-        # 1. Расчет Тейка (на основе динамического % из волатильности)
+        # 1. Тейк-Профит (через NATR)
         target_pct = self.current_tp_pct
         
-        if side == "Buy":
-            raw_tp = entry_price * (1 + target_pct / 100)
-            # Стоп для лонга: на 1 тик ниже стены
-            raw_sl = wall_price - tick
-        else: # Sell
-            raw_tp = entry_price * (1 - target_pct / 100)
-            # Стоп для шорта: на 1 тик выше стены
-            raw_sl = wall_price + tick
+        # 2. Стоп-Лосс: строго ОТ СТЕНЫ
+        # Берем отступ из конфига (там должно быть 1)
+        sl_offset = self.cfg.stop_loss_ticks * tick 
 
-        # 2. Округление до шага цены
+        if side == "Buy":
+            # TP: Вход + %
+            raw_tp = entry_price * (1 + target_pct / 100)
+            
+            # SL: Цена Стены - Отступ (вниз)
+            # Пример: Стена 100, Тик 1 -> Стоп 99
+            raw_sl = wall_price - sl_offset
+            
+        else: # Sell
+            # TP: Вход - %
+            raw_tp = entry_price * (1 - target_pct / 100)
+            
+            # SL: Цена Стены + Отступ (вверх)
+            # Пример: Стена 100, Тик 1 -> Стоп 101
+            raw_sl = wall_price + sl_offset
+
+        # 3. Округление
         tp_price = round(round(raw_tp / tick) * tick, 8)
         sl_price = round(round(raw_sl / tick) * tick, 8)
         
-        # 3. Санитарная проверка (чтобы Тейк не был слишком близко)
-        min_dist = 5 * tick
-        dist = abs(tp_price - entry_price)
-        
-        if dist < min_dist:
-            if side == "Buy": tp_price = entry_price + min_dist
-            else: tp_price = entry_price - min_dist
-            tp_price = round(tp_price, 8)
+        # [DEBUG LOG] Чтобы ты видел математику в консоли
+        logger.debug(
+            f"📐 CALC: Side={side} | Wall={wall_price} | Entry={entry_price} | "
+            f"SL_Offset={self.cfg.stop_loss_ticks} ticks | -> SL={sl_price}"
+        )
 
         return tp_price, sl_price
 
@@ -111,8 +114,6 @@ class MarketAnalytics:
                     natr * self.cfg.tp_natr_multiplier, 
                     self.cfg.min_tp_percent
                 )
-                
-                logger.debug(f"📊 Metrics updated: NATR={natr:.2f}%, TargetTP={self.current_tp_pct:.2f}%")
                 
             except Exception as e:
                 logger.error(f"❌ Volatility calculation error: {e}")
