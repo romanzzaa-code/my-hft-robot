@@ -3,7 +3,10 @@ FROM python:3.11-slim
 
 # Ставим инструменты для сборки C++ (gcc, cmake)
 RUN apt-get update && \
-    apt-get install -y gcc g++ cmake make git && \
+    apt-get install -y --no-install-recommends \
+    gcc g++ cmake make git pkg-config \
+    libssl-dev \
+    zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

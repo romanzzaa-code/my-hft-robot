@@ -714,3 +714,69 @@ hft_strategy/
 │   └── adaptive_live_strategy.py        (on_execution, _safe_cancel_and_reset)
 ├── live_bot.py                          (Dual Streamer Setup)
 └── config.py                            (Private URL)
+
+
+🔥 HFT Robot Project Context (Restore Point)
+Date: 07.01.2026 Role: Lead Quantitative Developer (Code Critic Persona) Status: Phase 4.2 Completed (Decoupled Architecture & Production Hardened)
+
+🎯 Текущий прогресс
+Мы ликвидировали «God Object» в лице AdaptiveWallStrategy, превратив его в чистый оркестратор. Теперь система соответствует принципам SOLID и готова к масштабированию на десятки торговых пар без хаоса в коде.
+
+🏗 Новая Архитектура (Service-Oriented)
+Логика разделена на три независимых сервиса, координируемых через AdaptiveWallStrategy:
+
+MarketAnalytics (services/analytics.py):
+
+Обязанность: Математика и волатильность.
+
+Функции: Фоновый расчет NATR (свечи 5м) и EMA фонового объема стакана.
+
+WallDetector (services/wall_detector.py):
+
+Обязанность: Генерация сигналов.
+
+Функции: Расчет динамических порогов «стен» и логика подтверждения (debounce 3 тика).
+
+TradeManager (services/trade_manager.py):
+
+Обязанность: «Руки» робота. Исполнение и контроль позиции.
+
+Функции: Управление TradeContext и StrategyState, реактивная обработка on_execution.
+
+✅ Что сделано (Critical Fixes & Upgrades)
+1. C++ Low-Latency Layer
+
+Parameterized Orders: Метод send_order расширен. Теперь поддерживает order_link_id, order_type (Limit/Market), time_in_force и reduce_only.
+
+Hermetic Build: CMakeLists.txt переведен на FetchContent. Библиотеки ixwebsocket и simdjson собираются автоматически.
+
+TLS Fix: Принудительно включен флаг USE_TLS для корректной работы wss:// внутри Docker.
+
+2. Strategy Logic (Safety First)
+
+Take Profit: Исправлен синтаксический баг. Внедрен asyncio.Lock и детерминированный order_link_id (tp_{entry_id}), что исключает дублирование ордеров при резких движениях цены.
+
+Panic Exit: Реализован каскадный выход (WS Market Order через C++ + REST Market Order). Используется IOC и reduce_only, что гарантирует закрытие без реджектов PostOnly.
+
+Ghost Fill Protection: TradeManager проверяет реально налитый объем перед отменой, предотвращая потерю контроля над позицией.
+
+3. Infrastructure & DevOps
+
+Hot Reload: В docker-compose.yml добавлены volumes. Теперь правки в Python применяются через docker compose restart bot за 2 секунды без перекомпиляции C++.
+
+Docker Stability: В Dockerfile добавлены системные зависимости libssl-dev и zlib1g-dev для сборки на любой архитектуре (Mac M4 / Ubuntu).
+
+📂 Обновленная структура файлов
+Plaintext
+hft_strategy/
+├── services/
+│   ├── analytics.py        (Математика рынка)
+│   ├── wall_detector.py    (Поиск сигналов)
+│   └── trade_manager.py    (Исполнение и FSM)
+├── strategies/
+│   └── adaptive_live_strategy.py (Тонкий оркестратор)
+├── domain/
+│   ├── trade_context.py    (Value Objects: State, Context)
+│   └── interfaces.py       (DIP: IExecutionHandler)
+└── infrastructure/
+    └── execution.py        (Bybit REST Wrapper)

@@ -16,7 +16,16 @@ public:
     
     // МЕТОДЫ ТОРГОВЛИ (Вызываются из Python)
     // Отправка лимитного ордера
-    void send_order(const std::string& symbol, const std::string& side, double qty, double price);
+    void send_order(
+        const std::string& symbol, 
+        const std::string& side, 
+        double qty, 
+        double price,
+        const std::string& order_link_id = "",       // Для отслеживания ордера
+        const std::string& order_type = "Limit",     // "Limit" или "Market"
+        const std::string& time_in_force = "PostOnly", // "PostOnly", "GTC", "IOC"
+        bool reduce_only = false                     // Ваша защита
+    );
     
     // Отмена ордера
     void cancel_order(const std::string& symbol, const std::string& order_id);

@@ -17,29 +17,40 @@ endif()
 
 # Ищем системные пакеты
 find_package(OpenSSL REQUIRED)
-find_package(ixwebsocket CONFIG REQUIRED)
-find_package(simdjson CONFIG REQUIRED)
+find_package(ZLIB REQUIRED)
 
-# --- 2. Подключаем библиотеки через FetchContent (Гарантия наличия) ---
+# --- 2. Автоматическая загрузка библиотек через FetchContent ---
 include(FetchContent)
 
-# 2.1. nlohmann_json (Качаем с GitHub, чтобы не искать локально)
 FetchContent_Declare(
     nlohmann_json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
     GIT_TAG        v3.11.3
 )
-FetchContent_MakeAvailable(nlohmann_json)
 
-# 2.2. Pybind11
+FetchContent_Declare(
+    simdjson
+    GIT_REPOSITORY https://github.com/simdjson/simdjson.git
+    GIT_TAG        v3.10.1
+)
+
+FetchContent_Declare(
+    ixwebsocket
+    GIT_REPOSITORY https://github.com/machinezone/IXWebSocket.git
+    GIT_TAG        v11.4.5
+)
+
 FetchContent_Declare(
   pybind11
   GIT_REPOSITORY https://github.com/pybind/pybind11.git
   GIT_TAG        v2.12.0
 )
-FetchContent_MakeAvailable(pybind11)
 
-find_package(Python 3.10 COMPONENTS Interpreter Development REQUIRED)
+set(USE_TLS ON CACHE BOOL "" FORCE)
+
+# Делаем всё доступным
+FetchContent_MakeAvailable(nlohmann_json simdjson ixwebsocket pybind11)
+
 
 # --- 3. Сборка модуля ---
 add_library(hft_core SHARED 
@@ -54,9 +65,10 @@ add_library(hft_core SHARED
 target_link_libraries(hft_core PRIVATE 
     ixwebsocket::ixwebsocket
     simdjson::simdjson
-    nlohmann_json::nlohmann_json # Теперь линкуется скачанная версия
+    nlohmann_json::nlohmann_json
     OpenSSL::SSL
     OpenSSL::Crypto
+    ZLIB::ZLIB
     pybind11::module
 )
 

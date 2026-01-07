@@ -23,6 +23,8 @@ services:
     build: .             # Строим из текущей папки
     container_name: hft_bot
     restart: always      # Перезапускаем при ошибках
+    volumes:
+      - ./hft_strategy:/app/hft_strategy
     depends_on:
       timescaledb:
         condition: service_healthy

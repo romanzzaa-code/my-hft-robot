@@ -67,19 +67,34 @@ void OrderGateway::authenticate() {
     webSocket.send(auth_msg.dump());
 }
 
-void OrderGateway::send_order(const std::string& symbol, const std::string& side, double qty, double price) {
+void OrderGateway::send_order(
+    const std::string& symbol, const std::string& side, double qty, double price,
+    const std::string& order_link_id, const std::string& order_type,
+    const std::string& time_in_force, bool reduce_only
+) {
     if (!authenticated_) {
         std::cerr << "[C++] ERROR: Cannot send order - Wait for Auth!" << std::endl;
         return;
     }
+
     nlohmann::json order;
     order["category"] = "linear";
     order["symbol"] = symbol;
     order["side"] = side; 
-    order["orderType"] = "Limit";
+    order["orderType"] = order_type;
     order["qty"] = std::to_string(qty); 
-    order["price"] = std::to_string(price);
-    order["timeInForce"] = "PostOnly"; 
+    
+    // Для рыночных ордеров цена может быть пустой
+    if (order_type == "Limit") {
+        order["price"] = std::to_string(price);
+    }
+
+    order["timeInForce"] = time_in_force;
+    order["reduceOnly"] = reduce_only; // Передаем флаг в API
+
+    if (!order_link_id.empty()) {
+        order["orderLinkId"] = order_link_id; // Критично для on_execution
+    }
 
     nlohmann::json msg;
     msg["op"] = "order.create"; 

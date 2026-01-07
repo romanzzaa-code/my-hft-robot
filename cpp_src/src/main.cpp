@@ -79,7 +79,15 @@ PYBIND11_MODULE(hft_core, m) {
         // Торговые методы (КРИТИЧНО: gil_scoped_release для скорости)
         .def("send_order", &OrderGateway::send_order, 
              py::call_guard<py::gil_scoped_release>(),
-             py::arg("symbol"), py::arg("side"), py::arg("qty"), py::arg("price"))
+             py::arg("symbol"),
+             py::arg("side"),
+             py::arg("qty"),
+             py::arg("price"),
+             py::arg("order_link_id") = "",
+             py::arg("order_type") = "Limit",
+             py::arg("time_in_force") = "PostOnly",
+             py::arg("reduce_only") = false
+        )     
              
         .def("cancel_order", &OrderGateway::cancel_order, 
              py::call_guard<py::gil_scoped_release>(),
