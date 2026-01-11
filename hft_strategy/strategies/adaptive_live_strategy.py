@@ -94,20 +94,43 @@ class AdaptiveWallStrategy:
                 take_profit=tp_price
             )
 
-    async def _process_order_placed(self):
-        ctx = self.trade_manager.ctx
-        if not ctx: return
+    # hft_strategy/strategies/adaptive_live_strategy.py
 
-        current_wall_v = self.lob.get_volume(ctx.side, ctx.wall_price)
-        threshold = self.analytics.avg_background_vol * self.cfg.wall_ratio_threshold * 0.5
-        
-        wall_gone = current_wall_v < threshold
-        timed_out = (time.time() - ctx.placed_ts) > 15.0
+async def _process_order_placed(self):
+    ctx = self.trade_manager.ctx
+    if not ctx: return
 
-        if wall_gone or timed_out:
-            reason = "Wall collapsed" if wall_gone else "Timeout"
-            logger.debug(f"🧱 {reason}. Cancelling entry...")
-            await self.trade_manager.cancel_entry()
+    # 1. Вместо проверки ОДНОЙ цены, ищем ЛУЧШУЮ стену на этой стороне
+    # Это позволяет "сопровождать" стену, если она двигается (tracking)
+    best_bid_p = self.lob.get_best("Buy")
+    best_ask_p = self.lob.get_best("Sell")
+    
+    # Находим актуальный объем стены в зоне +- 2 тика от старой цены
+    # (защита от микро-проскальзываний в памяти LOB)
+    current_wall_v = 0.0
+    for t in range(-2, 3):
+        check_p = ctx.wall_price + (t * self.cfg.tick_size)
+        current_wall_v = max(current_wall_v, self.lob.get_volume(ctx.side, check_p))
+
+    # 2. Динамический порог с защитой от мерцания
+    threshold = self.analytics.avg_background_vol * self.cfg.wall_ratio_threshold * 0.4 # Коэффициент 0.4 вместо 0.5
+    
+    # 3. ЛОГИКА ОТМЕНЫ (Refined)
+    wall_collapsed = current_wall_v < threshold
+    
+    # Проверка на "Сжатие спреда" (если цена ушла слишком далеко от нашей лимитки)
+    price_ran_away = False
+    if ctx.side == "Buy":
+        price_ran_away = best_bid_p > (ctx.entry_price + 5 * self.cfg.tick_size)
+    else:
+        price_ran_away = best_ask_p < (ctx.entry_price - 5 * self.cfg.tick_size)
+
+    timed_out = (time.time() - ctx.placed_ts) > 30.0 # Увеличим таймаут до 30с
+
+    if wall_collapsed or price_ran_away or timed_out:
+        reason = "Wall collapsed" if wall_collapsed else ("Price moved away" if price_ran_away else "Timeout")
+        logger.info(f"🧱 {reason} (Vol: {current_wall_v:.1f}). Cancelling entry...")
+        await self.trade_manager.cancel_entry()
 
     async def _process_in_position(self):
         ctx = self.trade_manager.ctx
@@ -115,7 +138,7 @@ class AdaptiveWallStrategy:
 
         best_bid = self.lob.get_best("Buy")
         best_ask = self.lob.get_best("Sell")
-        
+    
         exit_price = best_bid if ctx.side == "Buy" else best_ask
         
         # Условия Panic Exit (как второй слой защиты, если Hard SL не сработал или для скорости)

@@ -47,6 +47,7 @@ data/
 Thumbs.db
 *.swp
 *.swo
+vim.md
 
 # --- Secrets (Safety First!) ---
 secrets.py
