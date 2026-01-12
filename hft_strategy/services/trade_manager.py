@@ -76,72 +76,69 @@ class TradeManager:
     # --- ОБРАБОТКА ИСПОЛНЕНИЙ ---
     async def handle_execution(self, event):
         async with self._state_lock:
-            # Сценарий 1: Исполнение входа
+            # Вход (Entry)
             if self.ctx and (event.order_id == self.ctx.order_id or event.order_id.startswith("sim_")):
                 self.ctx.filled_qty += event.exec_qty
-                logger.info(f"⚡ [FILL] {self.cfg.symbol} +{event.exec_qty} (Total: {self.ctx.filled_qty})")
+                # Лог входа стал чуть подробнее
+                logger.info(f"🔵 [ENTRY] {self.cfg.symbol} | +{event.exec_qty} шт. по {event.exec_price}")
                 
                 if self.state == StrategyState.ORDER_PLACED:
                     self.state = StrategyState.IN_POSITION
-                
-                # [ВАЖНО] Мы НЕ вызываем sync_take_profit, так как TP уже заложен в ордере
 
-            # Сценарий 2: Закрытие (TP или SL сработал на бирже)
-            # В режиме Partial TP/SL создаются отдельные ордера, поэтому ID может отличаться.
-            # Смотрим на уменьшение позиции.
+            # Выход (Exit)
             elif self.ctx and self.state == StrategyState.IN_POSITION:
                 is_closing = (self.ctx.side == "Buy" and event.side == "Sell") or \
                              (self.ctx.side == "Sell" and event.side == "Buy")
                 
                 if is_closing:
+                    # --- Блок красивого лога (не влияет на торговлю) ---
+                    price_diff = (event.exec_price - self.ctx.entry_price) if self.ctx.side == "Buy" else (self.ctx.entry_price - event.exec_price)
+                    realized_pnl = price_diff * event.exec_qty
+                    
+                    if realized_pnl > 0:
+                        emoji = "✅ [TAKE PROFIT]"
+                    elif realized_pnl < 0:
+                        emoji = "❌ [STOP LOSS]"
+                    else:
+                        emoji = "😐 [FLAT]"
+                    
                     self.ctx.filled_qty -= event.exec_qty
-                    logger.info(f"📉 [EXIT] Closed {event.exec_qty}. Remaining: {self.ctx.filled_qty}")
+                    
+                    logger.info(
+                        f"{emoji} {self.cfg.symbol} | PnL: {realized_pnl:.4f} USDT | "
+                        f"Price: {event.exec_price} | Остаток позы: {self.ctx.filled_qty:.4f}"
+                    )
                     
                     if self.ctx.filled_qty <= 1e-9:
-                        logger.info(f"💰 Position fully closed. Resetting.")
+                        logger.info(f"🏁 Сделка закрыта полностью. Жду новый сигнал.")
                         self.reset()
 
-            # Сценарий 3: Сирота (Orphan Fill)
-            elif self.state == StrategyState.IDLE and event.exec_qty > 0:
-                 # Логика подхвата (опционально, если нужно)
-                 pass
-
     # --- ОТМЕНА И ВЫХОД ---
-    async def cancel_entry(self):
-        """Спекулятивная отмена без задержек"""
+    async def cancel_entry(self, reason: str = "Unknown"):
+        """Добавлен аргумент reason"""
         if self.state != StrategyState.ORDER_PLACED or not self.ctx: return
         
-        logger.info(f"🚫 [CANCEL] Attempting to cancel {self.cfg.symbol}...")
+        # Теперь мы видим ПОЧЕМУ мы отменяем
+        logger.info(f"🚫 [CANCEL] {self.cfg.symbol} | Reason: {reason} | ID: {self.ctx.order_id}")
+        
         try:
             await self.exec.cancel_order(self.cfg.symbol, self.ctx.order_id)
-            
-            # Если отмена прошла штатно (ордер еще висел):
             if self.ctx.filled_qty <= 1e-9:
                 self.reset()
             else:
-                # Частичное исполнение успело прилететь
                 self.state = StrategyState.IN_POSITION
-
         except Exception as e:
             err_str = str(e)
-            # [FIXED LOGIC] Теперь этот блок будет работать!
-            # Если ордер исчез — считаем, что он исполнился (Гонка)
             if "110001" in err_str or "Order not exists" in err_str:
                 logger.warning(f"🏎️ RACE CONDITION! Speculative fill for {self.cfg.symbol}")
-                
-                # Принудительно переводим в позицию
                 self.state = StrategyState.IN_POSITION
-                
-                # Если вебсокет еще не прислал execution, доверяем пессимистичному сценарию:
-                # Считаем, что налили ВСЁ.
                 if self.ctx.filled_qty <= 1e-9:
                     self.ctx.filled_qty = self.ctx.quantity
-                    logger.info(f"👻 Ghost Fill Assumption: {self.ctx.filled_qty} lots")
             else:
-                logger.error(f"❌ Cancel Failed completely: {e}")
+                logger.error(f"❌ Cancel Failed: {e}")
 
-    async def panic_exit(self):
-        """Экстренный выход по рынку (если стену проели)"""
+    async def panic_exit(self, reason: str = "Panic"):
+        """Добавлен аргумент reason"""
         if not self.ctx or self.ctx.filled_qty <= 1e-9:
             self.reset()
             return
@@ -149,7 +146,8 @@ class TradeManager:
         exit_side = "Sell" if self.ctx.side == "Buy" else "Buy"
         p_id = f"panic_{int(time.time())}"
         
-        logger.warning(f"🚨 [PANIC] Market {exit_side} {self.ctx.filled_qty}!")
+        # Яркий лог паники
+        logger.warning(f"🚨 [PANIC EXIT] {self.cfg.symbol} | Reason: {reason} | Dumping {self.ctx.filled_qty} by MARKET!")
         
         # 1. WebSocket IOC (Быстро)
         if self.gateway:

@@ -128,9 +128,9 @@ async def _process_order_placed(self):
     timed_out = (time.time() - ctx.placed_ts) > 30.0 # Увеличим таймаут до 30с
 
     if wall_collapsed or price_ran_away or timed_out:
-        reason = "Wall collapsed" if wall_collapsed else ("Price moved away" if price_ran_away else "Timeout")
+        reason = "Wall Collapsed" if wall_collapsed else ("Price Runaway" if price_ran_away else "Timeout 30s")
         logger.info(f"🧱 {reason} (Vol: {current_wall_v:.1f}). Cancelling entry...")
-        await self.trade_manager.cancel_entry()
+        await self.trade_manager.cancel_entry(reason=reason)
 
     async def _process_in_position(self):
         ctx = self.trade_manager.ctx
@@ -149,6 +149,6 @@ async def _process_order_placed(self):
         stop_hit = pnl_ticks <= -self.cfg.stop_loss_ticks
 
         if wall_broken or stop_hit:
-            reason = "WALL BREACH" if wall_broken else "STOP LOSS"
+            reason = f"Wall Broken (Price: {exit_price})" if wall_broken else f"Hard Stop Hit ({pnl_ticks:.1f} ticks)"
             logger.warning(f"🚨 {reason} ({pnl_ticks:.1f} ticks). Panic Exiting!")
-            await self.trade_manager.panic_exit()
+            await self.trade_manager.panic_exit(reason=reason)

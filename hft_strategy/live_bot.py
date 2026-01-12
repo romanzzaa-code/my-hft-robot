@@ -1,6 +1,7 @@
 # hft_strategy/live_bot.py
 import asyncio
 import logging
+from logging.handlers import TimedRotatingFileHandler
 import signal
 import sys
 import os
@@ -27,10 +28,45 @@ RESCAN_INTERVAL_SEC = 300  # 5 минут между переоценкой ры
 MAX_COINS_TO_TRADE = 3     # Сколько монет торгуем одновременно
 
 def setup_logging(config: Config):
+    # 1. Папка для логов
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "hft_bot.log")
+
+    # 2. Формат (добавил миллисекунды для HFT точности)
+    formatter = logging.Formatter(
+        '%(asctime)s.%(msecs)03d | %(levelname)-8s | %(name)s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    # 3. Хендлер для ФАЙЛА (Ротация раз в неделю, храним 4 недели)
+    file_handler = TimedRotatingFileHandler(
+        filename=log_file,
+        when='W0',        # W0 = Понедельник
+        interval=1,       # Каждую 1 неделю
+        backupCount=4,    # Хранить 4 файла (месяц)
+        encoding='utf-8'
+    )
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(logging.INFO)
+
+    # 4. Хендлер для КОНСОЛИ (Чтобы ты видел это глазами прямо сейчас)
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    stream_handler.setLevel(logging.INFO)
+
+    # 5. Применяем настройки
     logging.basicConfig(
         level=config.log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        handlers=[file_handler, stream_handler], # <--- ВАЖНО: Оба хендлера здесь
+        force=True # Перезаписать старые конфиги, если они были
     )
+    
+    # Глушим шум библиотек, чтобы видеть только свои сделки
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("pybit").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
+    logging.getLogger("ixwebsocket").setLevel(logging.WARNING)
 
 class BotOrchestrator:
     def __init__(self, config_path_dummy: str):
