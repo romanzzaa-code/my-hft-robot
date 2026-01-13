@@ -93,6 +93,14 @@ class AdaptiveWallStrategy:
                 stop_loss=sl_price,
                 take_profit=tp_price
             )
+    def set_graceful_stop(self):
+        """Вызывается оркестратором, когда монета вылетает из топа."""
+        self.trade_manager.request_stop()
+    
+    @property
+    def can_be_deleted(self) -> bool:
+        """Спрашиваем у менеджера, все ли дела завершены."""
+        return self.trade_manager.can_be_deleted
 
     # hft_strategy/strategies/adaptive_live_strategy.py
 
@@ -132,23 +140,23 @@ async def _process_order_placed(self):
         logger.info(f"🧱 {reason} (Vol: {current_wall_v:.1f}). Cancelling entry...")
         await self.trade_manager.cancel_entry(reason=reason)
 
-    async def _process_in_position(self):
-        ctx = self.trade_manager.ctx
-        if not ctx or ctx.filled_qty <= 1e-9: return
+async def _process_in_position(self):
+    ctx = self.trade_manager.ctx
+    if not ctx or ctx.filled_qty <= 1e-9: return
 
-        best_bid = self.lob.get_best("Buy")
-        best_ask = self.lob.get_best("Sell")
+    best_bid = self.lob.get_best("Buy")
+    best_ask = self.lob.get_best("Sell")
+
+    exit_price = best_bid if ctx.side == "Buy" else best_ask
     
-        exit_price = best_bid if ctx.side == "Buy" else best_ask
-        
-        # Условия Panic Exit (как второй слой защиты, если Hard SL не сработал или для скорости)
-        wall_broken = (exit_price < ctx.wall_price) if ctx.side == "Buy" else (exit_price > ctx.wall_price)
-        
-        delta = (exit_price - ctx.entry_price) if ctx.side == "Buy" else (ctx.entry_price - exit_price)
-        pnl_ticks = delta / self.cfg.tick_size
-        stop_hit = pnl_ticks <= -self.cfg.stop_loss_ticks
+    # Условия Panic Exit (как второй слой защиты, если Hard SL не сработал или для скорости)
+    wall_broken = (exit_price < ctx.wall_price) if ctx.side == "Buy" else (exit_price > ctx.wall_price)
+    
+    delta = (exit_price - ctx.entry_price) if ctx.side == "Buy" else (ctx.entry_price - exit_price)
+    pnl_ticks = delta / self.cfg.tick_size
+    stop_hit = pnl_ticks <= -self.cfg.stop_loss_ticks
 
-        if wall_broken or stop_hit:
-            reason = f"Wall Broken (Price: {exit_price})" if wall_broken else f"Hard Stop Hit ({pnl_ticks:.1f} ticks)"
-            logger.warning(f"🚨 {reason} ({pnl_ticks:.1f} ticks). Panic Exiting!")
-            await self.trade_manager.panic_exit(reason=reason)
+    if wall_broken or stop_hit:
+        reason = f"Wall Broken (Price: {exit_price})" if wall_broken else f"Hard Stop Hit ({pnl_ticks:.1f} ticks)"
+        logger.warning(f"🚨 {reason} ({pnl_ticks:.1f} ticks). Panic Exiting!")
+        await self.trade_manager.panic_exit(reason=reason)

@@ -194,23 +194,29 @@ class BotOrchestrator:
         # 4. Подписываем на стрим
         self.streamer.add_symbol(symbol)
 
+    # hft_strategy/live_bot.py
+
     async def _deactivate_strategy(self, symbol: str):
-        """Останавливает стратегию и убирает из ротации"""
+        """
+        [FIXED] Переводит стратегию в режим завершения (Graceful Shutdown), 
+        но НЕ удаляет объект, пока висят ордера.
+        """
         if symbol not in self.strategies:
             return
 
-        self.logger.info(f"💀 Killing strategy for {symbol} (Dropped from Top)...")
+        # Получаем объект стратегии
+        strategy = self.strategies[symbol]
         
-        # 1. Получаем объект стратегии
-        # strategy = self.strategies[symbol]
-        
-        # 2. Здесь можно вызвать strategy.shutdown(), если он есть
-        # Но главное - убрать из словаря, чтобы Routing Dispatcher перестал слать туда данные
-        del self.strategies[symbol]
-        
-        # 3. Отписываться в C++ (remove_symbol) пока не обязательно, 
-        # диспетчер просто будет игнорировать лишние данные.
-        # Но если метод есть, лучше вызвать: self.streamer.remove_symbol(symbol)
+        # Вместо del self.strategies[symbol] делаем это:
+        if not getattr(strategy, "is_shutting_down", False):
+            self.logger.info(f"🛑 Signal STOP for {symbol}. Waiting for active orders to clear...")
+            # Вызываем метод мягкой остановки (добавим его в стратегию на Этапе 2)
+            # Используем getattr для безопасности, пока метод не реализован
+            if hasattr(strategy, "set_graceful_stop"):
+                strategy.set_graceful_stop()
+            else:
+                # Временная заглушка (флаг)
+                strategy.is_shutting_down = True
 
     async def _rotation_loop(self):
         """
@@ -252,11 +258,27 @@ class BotOrchestrator:
                 for coin in to_add:
                     await self._activate_strategy(coin)
 
+            # --- [NEW] GARBAGE COLLECTOR (Сборщик мусора) ---
+                # Проходим по всем стратегиям и ищем кандидатов на удаление
+                keys_to_purge = []
+                for sym, strat in self.strategies.items():
+                    # Проверяем, готова ли стратегия уйти на покой
+                    # (свойство can_be_deleted мы реализуем на Этапе 2)
+                    if getattr(strat, "can_be_deleted", False):
+                        keys_to_purge.append(sym)
+                
+                # Реальное удаление из памяти
+                for sym in keys_to_purge:
+                    self.logger.info(f"🗑️ {sym} is clean (No orders/position). Removing from memory.")
+                    # Если нужно отписаться от сокета:
+                    # self.streamer.remove_symbol(sym) 
+                    del self.strategies[sym]
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 self.logger.exception(f"Rotation loop error: {e}")
-                await asyncio.sleep(60) # Пауза перед ретраем при ошибке
+                await asyncio.sleep(60)
 
     async def run(self):
         self.running = True

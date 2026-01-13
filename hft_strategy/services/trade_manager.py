@@ -20,16 +20,30 @@ class TradeManager:
         self.exec = executor
         self.gateway = gateway
         self.cfg = cfg
-        
+        self._stop_requested = False 
         self.state = StrategyState.IDLE
         self.ctx: Optional[TradeContext] = None
         self._tp_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()
+    
+    @property
+    def can_be_deleted(self) -> bool:
+        return self._stop_requested and self.state == StrategyState.IDLE
+    
+    def request_stop(self):
+        self._stop_requested = True
+        logger.info(f"⚠️ {self.cfg.symbol} switching to DRAIN MODE. No new entries allowed.")
+ 
 
     # --- АТОМАРНЫЙ ВХОД ---
+
     async def open_position(self, side: str, wall_price: float, entry_price: float, qty: float, stop_loss: float, take_profit: float):
         """Выставляет лимитный ордер СРАЗУ с TP и SL"""
         async with self._state_lock:
+            if self._stop_requested:
+                logger.debug(f"🛑 Entry ignored for {self.cfg.symbol} (Stopping)")
+                return
+                
             if self.state != StrategyState.IDLE: return
 
             client_oid = str(uuid.uuid4())
