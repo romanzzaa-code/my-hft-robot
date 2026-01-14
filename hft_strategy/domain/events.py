@@ -1,16 +1,35 @@
 # hft_strategy/domain/events.py
 
 """
-Domain Layer: Event Constants
-Single Source of Truth для типов событий и флагов.
-Используется для взаимодействия с hftbacktest и кодирования данных.
+Domain Layer: Event Constants & Structures
+Single Source of Truth для типов событий, флагов и структур данных (DTO).
 """
 
 import logging
+import time
+from dataclasses import dataclass, field
 
 logger = logging.getLogger("DOMAIN")
 
-# Попытка импорта из библиотеки (чтобы быть в синхроне с версией hftbacktest)
+# --- DOMAIN ENTITIES (DTOs) ---
+
+@dataclass
+class TradeSignal:
+    """
+    Объект-значение (Value Object), представляющий решение стратегии о сделке.
+    Передается из слоя стратегии в слой исполнения или уведомлений.
+    """
+    symbol: str
+    side: str        # "Buy" или "Sell"
+    price: float
+    qty: float
+    reason: str = "Unknown"
+    timestamp: float = field(default_factory=time.time)
+
+
+# --- HFTBACKTEST CONSTANTS ---
+# Эти константы нужны для совместимости с движком бэктеста
+
 try:
     from hftbacktest import (
         DEPTH_EVENT, 
@@ -23,7 +42,7 @@ try:
         LOCAL_EVENT
     )
 except ImportError:
-    logger.warning("⚠️ hftbacktest not found. Using HARDCODED v2 constants.")
+    # logger.warning("⚠️ hftbacktest not found. Using HARDCODED v2 constants.")
     # Фолбек значения для hftbacktest v2.x (Rust)
     # Старшие биты для источника
     EXCH_EVENT = 1 << 31  # 2147483648

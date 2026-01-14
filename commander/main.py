@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import asyncio
-import docker
+from aiodocker import Docker, DockerError
 from typing import Callable, Dict, Any, Awaitable, Optional
 
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
@@ -11,6 +11,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, TelegramOb
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from dotenv import load_dotenv
+from aiogram.exceptions import TelegramBadRequest
+from contextlib import suppress
 
 load_dotenv()
 
@@ -42,7 +44,7 @@ if not TOKEN:
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-docker_client = docker.from_env()
+docker_client = None
 
 # --- SECURITY MIDDLEWARE ---
 class AccessMiddleware(BaseMiddleware):
@@ -112,11 +114,21 @@ def save_user_config(filename: str, data: dict):
     with open(path, 'w') as f:
         json.dump(data, f, indent=4)
 
-def get_container(name: str):
+async def get_container_data(name: str):
+    """
+    Возвращает кортеж (объект_контейнера, данные_о_нем)
+    или (None, None), если контейнер не найден.
+    """
+    if not docker_client:
+        return None, None
+        
     try:
-        return docker_client.containers.get(name)
-    except docker.errors.NotFound:
-        return None
+        container = await docker_client.containers.get(name)
+        # В aiodocker нужно явно запросить инфо, чтобы узнать статус
+        data = await container.show() 
+        return container, data
+    except DockerError:
+        return None, None
 
 # --- HANDLERS ---
 
@@ -128,22 +140,45 @@ async def cmd_start(message: types.Message, user_context: dict):
 
 @dp.callback_query(F.data == "status")
 async def cb_status(callback: types.CallbackQuery, user_context: dict):
-    c = get_container(user_context["container"])
-    if c:
-        status_emoji = "🟢" if c.status == 'running' else "🔴"
-        img_tag = c.image.tags[0] if c.image.tags else "unknown"
-        await callback.message.edit_text(f"Target: {user_context['container']}\nStatus: {status_emoji} {c.status}\nImage: {img_tag}", reply_markup=main_menu())
+    # Асинхронный вызов
+    c, data = await get_container_data(user_context["container"])
+    
+    if c and data:
+        # Доступ к полям теперь через словарь (JSON структура Docker API)
+        state = data['State']['Status'] # 'running', 'exited', etc.
+        status_emoji = "🟢" if state == 'running' else "🔴"
+        
+        # Получение тега образа чуть сложнее в сыром JSON
+        # Обычно это Config -> Image, но надежнее взять из RepoTags если есть
+        # Для простоты возьмем Image ID или имя
+        img_tag = data['Config']['Image'] 
+        
+        text = f"Target: {user_context['container']}\nStatus: {status_emoji} {state}\nImage: {img_tag}"
+        
+        # FIX: Обработка ошибки 'message not modified'
+        with suppress(TelegramBadRequest):
+             await callback.message.edit_text(text, reply_markup=main_menu())
     else:
-        await callback.message.edit_text(f"❌ Container {user_context['container']} not found!", reply_markup=main_menu())
+        # Тут тоже suppress, на случай если текст ошибки тот же
+        with suppress(TelegramBadRequest):
+            await callback.message.edit_text(f"❌ Container {user_context['container']} not found!", reply_markup=main_menu())
+            
+    await callback.answer()
 
 @dp.callback_query(F.data == "logs")
 async def cb_logs(callback: types.CallbackQuery, user_context: dict):
-    c = get_container(user_context["container"])
+    c, data = await get_container_data(user_context["container"])
     if c:
         try:
-            logs = c.logs(tail=50).decode("utf-8")
+            # log возвращает список строк или генератор
+            logs_list = await c.log(stdout=True, stderr=True, tail=50)
+            
+            # aiodocker может возвращать список строк
+            logs = "".join(logs_list) if isinstance(logs_list, list) else str(logs_list)
+
             if len(logs) > 4000: logs = logs[-4000:]
             if not logs: logs = "Logs are empty."
+            
             await callback.message.answer(f"<pre>{logs}</pre>", parse_mode="HTML")
             await callback.answer()
         except Exception as e:
@@ -153,11 +188,12 @@ async def cb_logs(callback: types.CallbackQuery, user_context: dict):
 
 @dp.callback_query(F.data == "restart")
 async def cb_restart(callback: types.CallbackQuery, user_context: dict):
-    c = get_container(user_context["container"])
+    c, _ = await get_container_data(user_context["container"])
     if c:
         await callback.message.edit_text("🔄 Restarting... Please wait.")
         try:
-            c.restart()
+            # AWAIT IS CRITICAL HERE
+            await c.restart()
             await callback.message.edit_text("✅ Bot restarted!", reply_markup=main_menu())
         except Exception as e:
             await callback.message.edit_text(f"❌ Error: {e}", reply_markup=main_menu())
@@ -166,18 +202,28 @@ async def cb_restart(callback: types.CallbackQuery, user_context: dict):
 
 @dp.callback_query(F.data == "stop")
 async def cb_stop(callback: types.CallbackQuery, user_context: dict):
-    c = get_container(user_context["container"])
+    c, _ = await get_container_data(user_context["container"])
     if c:
         await callback.message.edit_text("🛑 Stopping...")
-        c.stop()
-        await callback.message.edit_text("✅ Bot stopped.", reply_markup=main_menu())
+        try:
+            await c.stop()
+            await callback.message.edit_text("✅ Bot stopped.", reply_markup=main_menu())
+        except Exception as e:
+             await callback.message.edit_text(f"❌ Error: {e}", reply_markup=main_menu())
+    else:
+         await callback.answer("Container not found")
 
 @dp.callback_query(F.data == "start")
 async def cb_start(callback: types.CallbackQuery, user_context: dict):
-    c = get_container(user_context["container"])
+    c, _ = await get_container_data(user_context["container"])
     if c:
-        c.start()
-        await callback.message.edit_text("✅ Bot started.", reply_markup=main_menu())
+        try:
+            await c.start()
+            await callback.message.edit_text("✅ Bot started.", reply_markup=main_menu())
+        except Exception as e:
+             await callback.message.edit_text(f"❌ Error: {e}", reply_markup=main_menu())
+    else:
+         await callback.answer("Container not found")
 
 @dp.callback_query(F.data == "config")
 async def cb_config(callback: types.CallbackQuery, user_context: dict):
@@ -221,15 +267,45 @@ async def process_new_value(message: types.Message, state: FSMContext, user_cont
 async def cb_back(callback: types.CallbackQuery):
     await callback.message.edit_text("Main Menu", reply_markup=main_menu())
 
+# --- LIFECYCLE HANDLERS ---
+async def on_startup():
+    global docker_client
+    docker_client = Docker()
+    logger.info("Docker client attached.")
+
+async def on_shutdown():
+    if docker_client:
+        await docker_client.close()
+        logger.info("Docker client closed.")
+
+# --- LIFECYCLE HANDLERS ---
+async def on_startup():
+    global docker_client
+    docker_client = Docker()
+    logger.info("Docker client attached.")
+
+async def on_shutdown():
+    if docker_client:
+        await docker_client.close()
+        logger.info("Docker client closed.")
+
 async def main():
     if not USER_MAP:
         logger.error("❌ NO USERS CONFIGURED!")
     
+    # Регистрируем Middleware
     dp.message.middleware(AccessMiddleware())
     dp.callback_query.middleware(AccessMiddleware())
+    
+    # Регистрируем startup/shutdown
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
     
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+    # Windows fix для asyncio loops (если запускаете локально на винде)
+    # if os.name == 'nt':
+    #     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())

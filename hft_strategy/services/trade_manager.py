@@ -4,6 +4,9 @@ import logging
 import time
 import uuid
 from typing import Optional
+
+# [FIX] Добавлен импорт TradeSignal, иначе упадет
+from hft_strategy.domain.events import TradeSignal 
 from hft_strategy.domain.trade_context import TradeContext, StrategyState
 from hft_strategy.domain.strategy_config import StrategyParameters
 from hft_strategy.domain.interfaces import IExecutionHandler
@@ -27,7 +30,8 @@ class TradeManager:
         self._tp_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()
 
-        self.logger = logging.getLogger(f"TradeManager-{symbol}")
+        # [FIX] symbol -> cfg.symbol (symbol не был определен)
+        self.logger = logging.getLogger(f"TradeManager-{cfg.symbol}")
     
     @property
     def can_be_deleted(self) -> bool:
@@ -52,19 +56,20 @@ class TradeManager:
             client_oid = str(uuid.uuid4())
             logger.info(f"🚀 [ENTRY] {side} {qty} @ {entry_price} | TP: {take_profit} | SL: {stop_loss}")
             
+            # [FIX] Исправлена логика нотификации (IndentationError + NameErrors)
             if self.notifier:
-            try:
-                signal = TradeSignal(
-                    symbol=self.symbol,
-                    side=side,
-                    price=price,
-                    qty=qty,
-                    reason="Strategy Signal"
-                )
-                # status="OPEN" значит, что мы открываем сделку
-                self.notifier.send_trade(signal, status="OPEN") 
-            except Exception as e:
-                self.logger.error(f"Failed to send notification: {e}")
+                try:
+                    signal = TradeSignal(
+                        symbol=self.cfg.symbol, # [FIX] self.symbol -> self.cfg.symbol
+                        side=side,
+                        price=entry_price,      # [FIX] price -> entry_price
+                        qty=qty,
+                        reason="Strategy Signal"
+                    )
+                    # status="OPEN" значит, что мы открываем сделку
+                    self.notifier.send_trade(signal, status="OPEN") 
+                except Exception as e:
+                    self.logger.error(f"Failed to send notification: {e}")
 
             # 1. C++ Gateway (Быстро)
             if self.gateway:
@@ -107,43 +112,53 @@ class TradeManager:
     # --- ОБРАБОТКА ИСПОЛНЕНИЙ ---
     async def handle_execution(self, event):
         async with self._state_lock:
-            # Вход (Entry)
+            # --- ВХОД (Entry) ---
             if self.ctx and (event.order_id == self.ctx.order_id or event.order_id.startswith("sim_")):
                 self.ctx.filled_qty += event.exec_qty
                 logger.info(f"🔵 [ENTRY] {self.cfg.symbol} | +{event.exec_qty} шт. по {event.exec_price}")
                 
                 if self.state == StrategyState.ORDER_PLACED:
                     self.state = StrategyState.IN_POSITION
+                    
+                # Уведомление о частичном или полном входе (опционально, чтобы не спамить)
+                # Если нужно - раскомментируйте:
+                if self.notifier:
+                    sig = TradeSignal(self.cfg.symbol, event.side, event.exec_price, event.exec_qty, reason="Filled")
+                    self.notifier.send_trade(sig, status="FILLED")
 
-                # Call send_trade for entry
-                await self.exec.send_trade(event)
-
-            # Выход (Exit)
+            # --- ВЫХОД (Exit) ---
             elif self.ctx and self.state == StrategyState.IN_POSITION:
                 is_closing = (self.ctx.side == "Buy" and event.side == "Sell") or \
                              (self.ctx.side == "Sell" and event.side == "Buy")
                 
                 if is_closing:
+                    # Расчет PnL
                     price_diff = (event.exec_price - self.ctx.entry_price) if self.ctx.side == "Buy" else (self.ctx.entry_price - event.exec_price)
                     realized_pnl = price_diff * event.exec_qty
                     
-                    if realized_pnl > 0:
-                        emoji = "✅ [TAKE PROFIT]"
-                    elif realized_pnl < 0:
-                        emoji = "❌ [STOP LOSS]"
-                    else:
-                        emoji = "😐 [FLAT]"
-                    
                     self.ctx.filled_qty -= event.exec_qty
                     
+                    # Логгирование
+                    log_emoji = "✅" if realized_pnl > 0 else "❌"
                     logger.info(
-                        f"{emoji} {self.cfg.symbol} | PnL: {realized_pnl:.4f} USDT | "
-                        f"Price: {event.exec_price} | Остаток позы: {self.ctx.filled_qty:.4f}"
+                        f"{log_emoji} {self.cfg.symbol} | PnL: {realized_pnl:.4f} USDT | "
+                        f"Price: {event.exec_price} | Остаток: {self.ctx.filled_qty:.4f}"
                     )
                     
-                    # Call send_trade for exit
-                    await self.exec.send_trade(event)
+                    # [FIX] ОТПРАВКА УВЕДОМЛЕНИЯ В TELEGRAM
+                    if self.notifier:
+                        status = "PROFIT" if realized_pnl > 0 else "LOSS"
+                        # Создаем объект сигнала для красивого форматирования
+                        sig = TradeSignal(
+                            symbol=self.cfg.symbol,
+                            side=event.side,       # Sell (если закрыли лонг)
+                            price=event.exec_price,
+                            qty=event.exec_qty,
+                            reason="Exit"
+                        )
+                        self.notifier.send_trade(sig, status=status, pnl=realized_pnl)
                     
+                    # Если позиция закрыта полностью - сброс
                     if self.ctx.filled_qty <= 1e-9:
                         logger.info(f"🏁 Сделка закрыта полностью. Жду новый сигнал.")
                         self.reset()
@@ -154,8 +169,9 @@ class TradeManager:
         if self.state != StrategyState.ORDER_PLACED or not self.ctx: return
 
         if self.notifier:
+             # [FIX] Использование правильного self.cfg.symbol
              self.notifier.send_trade(
-                 TradeSignal(self.symbol, "None", 0, 0, reason="Timeout/Cancel"), 
+                 TradeSignal(self.cfg.symbol, "None", 0, 0, reason="Timeout/Cancel"), 
                  status="CANCEL"
              )
         

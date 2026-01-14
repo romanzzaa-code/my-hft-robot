@@ -19,7 +19,8 @@ class AdaptiveWallStrategy:
     def __init__(self, 
                  executor: IExecutionHandler, 
                  cfg: StrategyParameters,
-                 gateway: Optional[object] = None):
+                 gateway: Optional[object] = None,
+                 notifier: Optional[object] = None): # [FIX] Added notifier
         
         self.cfg = cfg
         self.lob = LocalOrderBook()
@@ -27,7 +28,8 @@ class AdaptiveWallStrategy:
         
         self.analytics = MarketAnalytics(executor, cfg)
         self.detector = WallDetector(cfg)
-        self.trade_manager = TradeManager(executor, cfg, gateway)
+        # [FIX] Pass notifier to TradeManager
+        self.trade_manager = TradeManager(executor, cfg, gateway, notifier)
         
         asyncio.create_task(self.analytics.start())
 
@@ -69,22 +71,18 @@ class AdaptiveWallStrategy:
         )
         
         if signal:
-            # 1. Расчет объема с округлением до лота (Fix ErrCode 10001)
             step_size = self.cfg.lot_size if self.cfg.lot_size > 0 else 1.0
             raw_qty = self.cfg.order_amount_usdt / signal["entry_price"]
-            # Округляем вниз до ближайшего шага
             qty_final = round(int(raw_qty / step_size) * step_size, 8)
 
             if qty_final < self.cfg.min_qty: return
 
-            # 2. Получаем Атомарные уровни TP/SL из аналитики
             tp_price, sl_price = self.analytics.calculate_exits(
                 side=signal["side"],
                 entry_price=signal["entry_price"],
                 wall_price=signal["wall_price"]
             )
 
-            # 3. Отправляем Атомарный ордер (Вход + Страховка)
             await self.trade_manager.open_position(
                 side=signal["side"],
                 wall_price=signal["wall_price"],
@@ -93,6 +91,7 @@ class AdaptiveWallStrategy:
                 stop_loss=sl_price,
                 take_profit=tp_price
             )
+            
     def set_graceful_stop(self):
         """Вызывается оркестратором, когда монета вылетает из топа."""
         self.trade_manager.request_stop()
@@ -102,61 +101,53 @@ class AdaptiveWallStrategy:
         """Спрашиваем у менеджера, все ли дела завершены."""
         return self.trade_manager.can_be_deleted
 
-    # hft_strategy/strategies/adaptive_live_strategy.py
-
-async def _process_order_placed(self):
-    ctx = self.trade_manager.ctx
-    if not ctx: return
-
-    # 1. Вместо проверки ОДНОЙ цены, ищем ЛУЧШУЮ стену на этой стороне
-    # Это позволяет "сопровождать" стену, если она двигается (tracking)
-    best_bid_p = self.lob.get_best("Buy")
-    best_ask_p = self.lob.get_best("Sell")
+    # [FIX] Correct indentation for these methods:
     
-    # Находим актуальный объем стены в зоне +- 2 тика от старой цены
-    # (защита от микро-проскальзываний в памяти LOB)
-    current_wall_v = 0.0
-    for t in range(-2, 3):
-        check_p = ctx.wall_price + (t * self.cfg.tick_size)
-        current_wall_v = max(current_wall_v, self.lob.get_volume(ctx.side, check_p))
+    async def _process_order_placed(self):
+        ctx = self.trade_manager.ctx
+        if not ctx: return
 
-    # 2. Динамический порог с защитой от мерцания
-    threshold = self.analytics.avg_background_vol * self.cfg.wall_ratio_threshold * 0.4 # Коэффициент 0.4 вместо 0.5
-    
-    # 3. ЛОГИКА ОТМЕНЫ (Refined)
-    wall_collapsed = current_wall_v < threshold
-    
-    # Проверка на "Сжатие спреда" (если цена ушла слишком далеко от нашей лимитки)
-    price_ran_away = False
-    if ctx.side == "Buy":
-        price_ran_away = best_bid_p > (ctx.entry_price + 5 * self.cfg.tick_size)
-    else:
-        price_ran_away = best_ask_p < (ctx.entry_price - 5 * self.cfg.tick_size)
+        best_bid_p = self.lob.get_best("Buy")
+        best_ask_p = self.lob.get_best("Sell")
+        
+        current_wall_v = 0.0
+        for t in range(-2, 3):
+            check_p = ctx.wall_price + (t * self.cfg.tick_size)
+            current_wall_v = max(current_wall_v, self.lob.get_volume(ctx.side, check_p))
 
-    timed_out = (time.time() - ctx.placed_ts) > 30.0 # Увеличим таймаут до 30с
+        threshold = self.analytics.avg_background_vol * self.cfg.wall_ratio_threshold * 0.4 
+        
+        wall_collapsed = current_wall_v < threshold
+        
+        price_ran_away = False
+        if ctx.side == "Buy":
+            price_ran_away = best_bid_p > (ctx.entry_price + 5 * self.cfg.tick_size)
+        else:
+            price_ran_away = best_ask_p < (ctx.entry_price - 5 * self.cfg.tick_size)
 
-    if wall_collapsed or price_ran_away or timed_out:
-        reason = "Wall Collapsed" if wall_collapsed else ("Price Runaway" if price_ran_away else "Timeout 30s")
-        logger.info(f"🧱 {reason} (Vol: {current_wall_v:.1f}). Cancelling entry...")
-        await self.trade_manager.cancel_entry(reason=reason)
+        timed_out = (time.time() - ctx.placed_ts) > 30.0 
 
-async def _process_in_position(self):
-    ctx = self.trade_manager.ctx
-    if not ctx or ctx.filled_qty <= 1e-9: return
+        if wall_collapsed or price_ran_away or timed_out:
+            reason = "Wall Collapsed" if wall_collapsed else ("Price Runaway" if price_ran_away else "Timeout 30s")
+            logger.info(f"🧱 {reason} (Vol: {current_wall_v:.1f}). Cancelling entry...")
+            await self.trade_manager.cancel_entry(reason=reason)
 
-    best_bid = self.lob.get_best("Buy")
-    best_ask = self.lob.get_best("Sell")
+    async def _process_in_position(self):
+        ctx = self.trade_manager.ctx
+        if not ctx or ctx.filled_qty <= 1e-9: return
 
-    exit_price = best_bid if ctx.side == "Buy" else best_ask
-    
-    # Условия Panic Exit (как второй слой защиты, если Hard SL не сработал или для скорости)
-    wall_broken = (exit_price < ctx.wall_price) if ctx.side == "Buy" else (exit_price > ctx.wall_price)
-    
-    delta = (exit_price - ctx.entry_price) if ctx.side == "Buy" else (ctx.entry_price - exit_price)
-    pnl_ticks = delta / self.cfg.tick_size
-    stop_hit = pnl_ticks <= -self.cfg.stop_loss_ticks
+        best_bid = self.lob.get_best("Buy")
+        best_ask = self.lob.get_best("Sell")
 
-    if wall_broken or stop_hit:
-        reason = f"Wall Broken (Price: {exit_price})" if wall_broken else f"Hard Stop Hit ({pnl_ticks:.1f} ticks)"
-        logger.warning(f"🚨 {reason} ({pnl_ticks:.1f} ticks). Panic Exiting!")
-        await self.trade_manager.panic_exit(reason=reason)
+        exit_price = best_bid if ctx.side == "Buy" else best_ask
+        
+        wall_broken = (exit_price < ctx.wall_price) if ctx.side == "Buy" else (exit_price > ctx.wall_price)
+        
+        delta = (exit_price - ctx.entry_price) if ctx.side == "Buy" else (ctx.entry_price - exit_price)
+        pnl_ticks = delta / self.cfg.tick_size
+        stop_hit = pnl_ticks <= -self.cfg.stop_loss_ticks
+
+        if wall_broken or stop_hit:
+            reason = f"Wall Broken (Price: {exit_price})" if wall_broken else f"Hard Stop Hit ({pnl_ticks:.1f} ticks)"
+            logger.warning(f"🚨 {reason} ({pnl_ticks:.1f} ticks). Panic Exiting!")
+            await self.trade_manager.panic_exit(reason=reason)

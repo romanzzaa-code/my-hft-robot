@@ -6,7 +6,7 @@ import signal
 import sys
 import os
 import copy
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 
 # --- PATH HACK ---
 sys.path.append(os.getcwd())
@@ -22,7 +22,7 @@ from hft_strategy.config import load_config, Config
 from hft_strategy.infrastructure.execution import BybitExecutionHandler
 from hft_strategy.services.smart_scanner import SmartMarketSelector
 from hft_strategy.strategies.adaptive_live_strategy import AdaptiveWallStrategy
-from hft_strategy.services.notification import TelegramNotifier # Импорт твоего класса
+from hft_strategy.services.notification import TelegramNotifier
 
 # --- CONSTANTS ---
 RESCAN_INTERVAL_SEC = 300  # 5 минут между переоценкой рынка
@@ -59,11 +59,11 @@ def setup_logging(config: Config):
     # 5. Применяем настройки
     logging.basicConfig(
         level=config.log_level,
-        handlers=[file_handler, stream_handler], # <--- ВАЖНО: Оба хендлера здесь
-        force=True # Перезаписать старые конфиги, если они были
+        handlers=[file_handler, stream_handler], 
+        force=True 
     )
     
-    # Глушим шум библиотек, чтобы видеть только свои сделки
+    # Глушим шум библиотек
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("pybit").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
@@ -78,6 +78,7 @@ class BotOrchestrator:
         
         self.running = False
         self.loop = None
+        self.notifier: Optional[TelegramNotifier] = None
         
         # Словарь для хранения стратегий: Symbol -> StrategyInstance
         self.strategies: Dict[str, AdaptiveWallStrategy] = {}
@@ -125,12 +126,10 @@ class BotOrchestrator:
     # --- ROUTING DISPATCHERS (Маршрутизаторы) ---
     def _dispatch_tick(self, tick):
         if tick.symbol in self.strategies:
-            # Тики обрабатываем синхронно (это быстро)
             self.strategies[tick.symbol].on_tick(tick)
 
     def _dispatch_depth(self, snapshot):
         if snapshot.symbol in self.strategies and self.loop:
-            # ПЕРЕБРАСЫВАЕМ В ГЛАВНЫЙ ПОТОК ЧЕРЕЗ threadsafe
             asyncio.run_coroutine_threadsafe(
                 self.strategies[snapshot.symbol].on_depth(snapshot),
                 self.loop
@@ -138,7 +137,6 @@ class BotOrchestrator:
 
     def _dispatch_execution(self, exec_data):
         if exec_data.symbol in self.strategies and self.loop:
-            # ПЕРЕБРАСЫВАЕМ В ГЛАВНЫЙ ПОТОК ЧЕРЕЗ threadsafe
             asyncio.run_coroutine_threadsafe(
                 self.strategies[exec_data.symbol].on_execution(exec_data),
                 self.loop
@@ -158,7 +156,7 @@ class BotOrchestrator:
     async def _activate_strategy(self, symbol: str):
         """Создает и запускает стратегию для новой монеты"""
         if symbol in self.strategies:
-            return # Уже работает
+            return 
 
         self.logger.info(f"✨ Spawning strategy for {symbol}...")
         
@@ -166,27 +164,24 @@ class BotOrchestrator:
         strat_cfg = copy.copy(self.config.strategy)
         strat_cfg.symbol = symbol
         
-        # [FIX] ЗАПРАШИВАЕМ СПЕЦИФИКАЦИЮ С БИРЖИ
+        # Получаем спецификацию с биржи
         try:
-            # Получаем реальный шаг цены и лота
             tick_size, step_size, min_qty = await self.execution_handler.fetch_instrument_info(symbol)
-            
-            # Обновляем конфиг стратегии
             strat_cfg.tick_size = tick_size
             strat_cfg.lot_size = step_size
             strat_cfg.min_qty = min_qty
-            
             self.logger.info(f"📏 {symbol} Specs: Tick={tick_size}, Lot={step_size}")
-            
         except Exception as e:
             self.logger.error(f"❌ Failed to fetch specs for {symbol}: {e}")
-            return # Не запускаем стратегию с кривым конфигом
+            return 
         
-        # 2. Создаем стратегию (теперь с правильным tick_size)
+        # 2. Создаем стратегию
+        # [FIX] Передаем notifier внутрь стратегии
         strategy = AdaptiveWallStrategy(
             executor=self.execution_handler,
             cfg=strat_cfg,
-            gateway=self.gateway
+            gateway=self.gateway,
+            notifier=self.notifier 
         )
         
         # 3. Регистрируем
@@ -195,84 +190,58 @@ class BotOrchestrator:
         # 4. Подписываем на стрим
         self.streamer.add_symbol(symbol)
 
-    # hft_strategy/live_bot.py
-
     async def _deactivate_strategy(self, symbol: str):
-        """
-        [FIXED] Переводит стратегию в режим завершения (Graceful Shutdown), 
-        но НЕ удаляет объект, пока висят ордера.
-        """
         if symbol not in self.strategies:
             return
 
-        # Получаем объект стратегии
         strategy = self.strategies[symbol]
         
-        # Вместо del self.strategies[symbol] делаем это:
         if not getattr(strategy, "is_shutting_down", False):
             self.logger.info(f"🛑 Signal STOP for {symbol}. Waiting for active orders to clear...")
-            # Вызываем метод мягкой остановки (добавим его в стратегию на Этапе 2)
-            # Используем getattr для безопасности, пока метод не реализован
             if hasattr(strategy, "set_graceful_stop"):
                 strategy.set_graceful_stop()
             else:
-                # Временная заглушка (флаг)
                 strategy.is_shutting_down = True
 
     async def _rotation_loop(self):
-        """
-        Фоновый процесс: каждые 5 минут пересматривает портфель
-        """
         self.logger.info(f"🔄 Rotation Watchdog started (Interval: {RESCAN_INTERVAL_SEC}s)")
         
         while self.running:
             try:
-                # Ждем интервал (используем wait_for чтобы прерываться при shutdown)
                 await asyncio.sleep(RESCAN_INTERVAL_SEC)
-                
                 self.logger.info("🕵️ Periodic Market Rescan triggered...")
                 
-                # 1. Сканируем рынок
                 new_top_coins = await self._find_best_assets(limit=MAX_COINS_TO_TRADE)
                 if not new_top_coins:
-                    continue # Если сканер упал, ничего не меняем
+                    continue 
 
                 current_coins = set(self.strategies.keys())
                 new_set = set(new_top_coins)
 
-                # 2. Вычисляем дельту
                 to_add = new_set - current_coins
                 to_remove = current_coins - new_set
                 to_keep = current_coins & new_set
 
                 if not to_add and not to_remove:
                     self.logger.info("💤 No changes in market leadership. Maintaining positions.")
-                    continue
+                    pass
+                else:
+                    self.logger.info(f"⚖️ Rebalancing: +{to_add} | -{to_remove} | Keeping: {to_keep}")
 
-                self.logger.info(f"⚖️ Rebalancing: +{to_add} | -{to_remove} | Keeping: {to_keep}")
+                    for coin in to_remove:
+                        await self._deactivate_strategy(coin)
 
-                # 3. Убираем слабых
-                for coin in to_remove:
-                    await self._deactivate_strategy(coin)
+                    for coin in to_add:
+                        await self._activate_strategy(coin)
 
-                # 4. Добавляем сильных
-                for coin in to_add:
-                    await self._activate_strategy(coin)
-
-            # --- [NEW] GARBAGE COLLECTOR (Сборщик мусора) ---
-                # Проходим по всем стратегиям и ищем кандидатов на удаление
+                # Garbage Collector
                 keys_to_purge = []
                 for sym, strat in self.strategies.items():
-                    # Проверяем, готова ли стратегия уйти на покой
-                    # (свойство can_be_deleted мы реализуем на Этапе 2)
                     if getattr(strat, "can_be_deleted", False):
                         keys_to_purge.append(sym)
                 
-                # Реальное удаление из памяти
                 for sym in keys_to_purge:
-                    self.logger.info(f"🗑️ {sym} is clean (No orders/position). Removing from memory.")
-                    # Если нужно отписаться от сокета:
-                    # self.streamer.remove_symbol(sym) 
+                    self.logger.info(f"🗑️ {sym} is clean. Removing from memory.")
                     del self.strategies[sym]
 
             except asyncio.CancelledError:
@@ -282,51 +251,39 @@ class BotOrchestrator:
                 await asyncio.sleep(60)
 
     async def run(self):
-        # 1. Читаем настройки из переменных окружения (которые мы прописали в docker-compose)
+        # 1. Читаем настройки из переменных окружения
         tg_token = os.getenv("TG_NOTIFIER_TOKEN")
         chat_id = os.getenv("TG_CHAT_ID")
 
         # 2. Инициализируем нотификатор (если настройки есть)
-        notifier = None
         if tg_token and chat_id:
-            notifier = TelegramNotifier(token=tg_token, chat_id=chat_id)
-            await notifier.start() # Запускаем сессию
-            logger.info(f"🔔 Notifications enabled for ID: {chat_id}")
+            self.notifier = TelegramNotifier(token=tg_token, chat_id=chat_id)
+            await self.notifier.start() 
+            self.logger.info(f"🔔 Notifications enabled for ID: {chat_id}")
         else:
-            logger.warning("🔕 Notifications DISABLED (Token or ChatID missing)")
+            self.logger.warning("🔕 Notifications DISABLED (Token or ChatID missing)")
 
-        # 3. Передаем notifier в TradeManager
-        # (Убедись, что TradeManager принимает notifier в __init__)
-        self.trade_manager = TradeManager(
-            client=self.client,
-            symbol=self.symbol,
-            notifier=notifier,  # <--- ВОТ ЗДЕСЬ
-        
-        )
+        # [FIX] Удален блок ошибочного создания TradeManager здесь. 
+        # TradeManager создается внутри AdaptiveWallStrategy.
+
         self.running = True
-        
         self.loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             self.loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
 
         try:
-            # Настройка роутинга
             self._setup_streamer_routing()
             
-            # Подключение к шлюзу
             self.logger.info("🔗 Connecting Order Gateway...")
             self.gateway.connect()
             await asyncio.sleep(1.0)
             
-            # Запуск потока данных
             self.logger.info("🌊 Starting Data Stream...")
             self.streamer.start()
 
-            # --- INITIAL ALLOCATION ---
             self.logger.info("🚀 Doing Initial Market Scan...")
             top_coins = await self._find_best_assets(limit=MAX_COINS_TO_TRADE)
             
-            # Если сканер ничего не нашел при старте - берем дефолт из конфига
             if not top_coins:
                 top_coins = [self.config.symbol]
                 self.logger.warning(f"⚠️ Using fallback coin: {top_coins}")
@@ -336,15 +293,11 @@ class BotOrchestrator:
             
             self.logger.info(f"✅ Bot is running on: {list(self.strategies.keys())}")
 
-            # --- START ROTATION LOOP ---
-            # Запускаем фоновую задачу ротации
             rotation_task = asyncio.create_task(self._rotation_loop())
 
-            # Главный цикл (просто держит процесс живым)
             while self.running:
                 await asyncio.sleep(1)
             
-            # Ожидаем завершения ротации при выходе
             rotation_task.cancel()
             try:
                 await rotation_task
@@ -356,8 +309,8 @@ class BotOrchestrator:
         except Exception as e:
             self.logger.exception(f"Unexpected error: {e}")
         finally:
-            if notifier:
-                 await notifier.stop() # Не забываем закрыть сессию
+            if self.notifier:
+                 await self.notifier.stop()
             await self.shutdown()
 
     async def shutdown(self):
