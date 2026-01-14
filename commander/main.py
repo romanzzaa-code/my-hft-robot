@@ -3,11 +3,17 @@ import json
 import logging
 import asyncio
 from aiodocker import Docker, DockerError
-from typing import Callable, Dict, Any, Awaitable, Optional
+from typing import Callable, Dict, Any, Awaitable
 
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, TelegramObject
+from aiogram.types import (
+    ReplyKeyboardMarkup, 
+    KeyboardButton, 
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton, 
+    TelegramObject
+)
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from dotenv import load_dotenv
@@ -18,8 +24,6 @@ load_dotenv()
 
 # --- CONFIG ---
 TOKEN = os.getenv("TG_COMMANDER_TOKEN")
-
-# Настройка пользователей: ID -> {Контейнер, Файл конфига}
 USER_MAP = {
     int(os.getenv("TG_MY_ID", 0)): {
         "container": "hft_bot",
@@ -30,7 +34,6 @@ USER_MAP = {
         "config_file": "friend_params.json"
     }
 }
-# Убираем 0 (если ID не задан в .env)
 if 0 in USER_MAP: del USER_MAP[0]
 
 CONFIG_DIR = "/app/config"
@@ -55,14 +58,9 @@ class AccessMiddleware(BaseMiddleware):
         data: Dict[str, Any]
     ) -> Any:
         user = data.get("event_from_user")
-        if user is None:
-            return await handler(event, data)
-
-        # Проверяем, есть ли пользователь в нашей карте разрешенных
-        if user.id not in USER_MAP:
-            return # Игнорируем чужаков
-            
-        # Прокидываем контекст пользователя в хендлер
+        if user is None or user.id not in USER_MAP:
+            return 
+        
         data["user_context"] = USER_MAP[user.id]
         return await handler(event, data)
 
@@ -71,30 +69,30 @@ class EditState(StatesGroup):
     waiting_for_value = State()
     key_to_edit = State()
 
-# --- KEYBOARDS ---
+# --- KEYBOARDS (UPDATED) ---
+
+# 1. Main Menu -> Persistent Reply Keyboard
 def main_menu():
     kb = [
-        [InlineKeyboardButton(text="🟢 Status", callback_data="status"),
-         InlineKeyboardButton(text="📜 Logs (50)", callback_data="logs")],
-        [InlineKeyboardButton(text="⚙️ Config", callback_data="config"),
-         InlineKeyboardButton(text="🔄 Restart Bot", callback_data="restart")],
-        [InlineKeyboardButton(text="🛑 Stop Bot", callback_data="stop"),
-         InlineKeyboardButton(text="▶️ Start Bot", callback_data="start")]
+        [KeyboardButton(text="🟢 Status"), KeyboardButton(text="📜 Logs")],
+        [KeyboardButton(text="⚙️ Config"), KeyboardButton(text="🔄 Restart")],
+        [KeyboardButton(text="🛑 Stop"), KeyboardButton(text="▶️ Start")]
     ]
-    return InlineKeyboardMarkup(inline_keyboard=kb)
+    # resize_keyboard=True делает кнопки компактными
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True, is_persistent=True)
 
-def config_menu(data):
+# 2. Config Menu -> Inline (Contextual)
+def config_inline_kb(data):
     kb = []
     keys = ["investment_usdt", "wall_ratio_threshold", "min_wall_value_usdt", "vol_ema_alpha"]
     for k in keys:
         val = data.get(k, "N/A")
-        if isinstance(val, float):
-            val_str = f"{val:.4f}"
-        else:
-            val_str = str(val)
+        val_str = f"{val:.4f}" if isinstance(val, float) else str(val)
         btn_text = f"{k}: {val_str}"
         kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"edit_{k}")])
-    kb.append([InlineKeyboardButton(text="🔙 Back", callback_data="back")])
+    
+    # Кнопка Close убирает инлайн сообщение, но оставляет Reply меню
+    kb.append([InlineKeyboardButton(text="❌ Close Config", callback_data="close_config")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 # --- UTILS ---
@@ -115,130 +113,124 @@ def save_user_config(filename: str, data: dict):
         json.dump(data, f, indent=4)
 
 async def get_container_data(name: str):
-    """
-    Возвращает кортеж (объект_контейнера, данные_о_нем)
-    или (None, None), если контейнер не найден.
-    """
-    if not docker_client:
-        return None, None
-        
+    if not docker_client: return None, None
     try:
         container = await docker_client.containers.get(name)
-        # В aiodocker нужно явно запросить инфо, чтобы узнать статус
         data = await container.show() 
         return container, data
     except DockerError:
         return None, None
 
-# --- HANDLERS ---
+# --- HANDLERS (REFACTORED FOR REPLY KEYBOARD) ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, user_context: dict):
     target = user_context["container"]
-    await message.answer(f"🫡 Welcome, Operator.\nTarget System: <b>{target}</b>", 
-                         reply_markup=main_menu(), parse_mode="HTML")
+    await message.answer(
+        f"🫡 <b>Operator Ready.</b>\nTarget: {target}\n\n<i>Menu is pinned below</i> 👇", 
+        reply_markup=main_menu(), 
+        parse_mode="HTML"
+    )
 
-@dp.callback_query(F.data == "status")
-async def cb_status(callback: types.CallbackQuery, user_context: dict):
-    # Асинхронный вызов
+@dp.message(F.text == "🟢 Status")
+async def msg_status(message: types.Message, user_context: dict):
     c, data = await get_container_data(user_context["container"])
-    
     if c and data:
-        # Доступ к полям теперь через словарь (JSON структура Docker API)
-        state = data['State']['Status'] # 'running', 'exited', etc.
+        state = data['State']['Status']
         status_emoji = "🟢" if state == 'running' else "🔴"
-        
-        # Получение тега образа чуть сложнее в сыром JSON
-        # Обычно это Config -> Image, но надежнее взять из RepoTags если есть
-        # Для простоты возьмем Image ID или имя
-        img_tag = data['Config']['Image'] 
-        
+        img_tag = data['Config']['Image']
         text = f"Target: {user_context['container']}\nStatus: {status_emoji} {state}\nImage: {img_tag}"
-        
-        # FIX: Обработка ошибки 'message not modified'
-        with suppress(TelegramBadRequest):
-             await callback.message.edit_text(text, reply_markup=main_menu())
+        await message.answer(text)
     else:
-        # Тут тоже suppress, на случай если текст ошибки тот же
-        with suppress(TelegramBadRequest):
-            await callback.message.edit_text(f"❌ Container {user_context['container']} not found!", reply_markup=main_menu())
-            
-    await callback.answer()
+        await message.answer(f"❌ Container {user_context['container']} not found!")
 
-@dp.callback_query(F.data == "logs")
-async def cb_logs(callback: types.CallbackQuery, user_context: dict):
+@dp.message(F.text == "📜 Logs")
+async def msg_logs(message: types.Message, user_context: dict):
     c, data = await get_container_data(user_context["container"])
     if c:
         try:
-            # log возвращает список строк или генератор
+            status_msg = await message.answer("⏳ Fetching logs...")
             logs_list = await c.log(stdout=True, stderr=True, tail=50)
-            
-            # aiodocker может возвращать список строк
             logs = "".join(logs_list) if isinstance(logs_list, list) else str(logs_list)
-
+            
             if len(logs) > 4000: logs = logs[-4000:]
             if not logs: logs = "Logs are empty."
             
-            await callback.message.answer(f"<pre>{logs}</pre>", parse_mode="HTML")
-            await callback.answer()
+            await status_msg.edit_text(f"<pre>{logs}</pre>", parse_mode="HTML")
         except Exception as e:
-            await callback.answer(f"Error: {e}")
+            await message.answer(f"Error: {e}")
     else:
-        await callback.answer("Container not found")
+        await message.answer("Container not found")
 
-@dp.callback_query(F.data == "restart")
-async def cb_restart(callback: types.CallbackQuery, user_context: dict):
+@dp.message(F.text == "🔄 Restart")
+async def msg_restart(message: types.Message, user_context: dict):
     c, _ = await get_container_data(user_context["container"])
     if c:
-        await callback.message.edit_text("🔄 Restarting... Please wait.")
+        msg = await message.answer("🔄 Restarting...")
         try:
-            # AWAIT IS CRITICAL HERE
             await c.restart()
-            await callback.message.edit_text("✅ Bot restarted!", reply_markup=main_menu())
+            await msg.edit_text("✅ Bot restarted!")
         except Exception as e:
-            await callback.message.edit_text(f"❌ Error: {e}", reply_markup=main_menu())
+            await msg.edit_text(f"❌ Error: {e}")
     else:
-        await callback.answer("Container not found")
+        await message.answer("Container not found")
 
-@dp.callback_query(F.data == "stop")
-async def cb_stop(callback: types.CallbackQuery, user_context: dict):
+@dp.message(F.text == "🛑 Stop")
+async def msg_stop(message: types.Message, user_context: dict):
     c, _ = await get_container_data(user_context["container"])
     if c:
-        await callback.message.edit_text("🛑 Stopping...")
+        msg = await message.answer("🛑 Stopping...")
         try:
             await c.stop()
-            await callback.message.edit_text("✅ Bot stopped.", reply_markup=main_menu())
+            await msg.edit_text("✅ Bot stopped.")
         except Exception as e:
-             await callback.message.edit_text(f"❌ Error: {e}", reply_markup=main_menu())
+            await msg.edit_text(f"❌ Error: {e}")
     else:
-         await callback.answer("Container not found")
+        await message.answer("Container not found")
 
-@dp.callback_query(F.data == "start")
-async def cb_start(callback: types.CallbackQuery, user_context: dict):
+@dp.message(F.text == "▶️ Start")
+async def msg_start(message: types.Message, user_context: dict):
     c, _ = await get_container_data(user_context["container"])
     if c:
         try:
             await c.start()
-            await callback.message.edit_text("✅ Bot started.", reply_markup=main_menu())
+            await message.answer("✅ Bot started.")
         except Exception as e:
-             await callback.message.edit_text(f"❌ Error: {e}", reply_markup=main_menu())
+            await message.answer(f"❌ Error: {e}")
     else:
-         await callback.answer("Container not found")
+        await message.answer("Container not found")
 
-@dp.callback_query(F.data == "config")
-async def cb_config(callback: types.CallbackQuery, user_context: dict):
+# --- CONFIGURATION (HYBRID: Text Trigger -> Inline Menu) ---
+
+@dp.message(F.text == "⚙️ Config")
+async def msg_config(message: types.Message, user_context: dict):
     data = load_user_config(user_context["config_file"])
     if "error" in data:
-        await callback.answer(f"Config Error: {data['error']}")
+        await message.answer(f"Config Error: {data['error']}")
         return
-    await callback.message.edit_text(f"🔧 Config: {user_context['config_file']}", reply_markup=config_menu(data))
+    await message.answer(
+        f"🔧 <b>Configuration</b>\nFile: {user_context['config_file']}", 
+        reply_markup=config_inline_kb(data),
+        parse_mode="HTML"
+    )
 
 @dp.callback_query(F.data.startswith("edit_"))
 async def cb_edit_value(callback: types.CallbackQuery, state: FSMContext):
     key = callback.data.split("edit_")[1]
     await state.update_data(key_to_edit=key)
     await state.set_state(EditState.waiting_for_value)
-    await callback.message.answer(f"✍️ Enter new value for <b>{key}</b>:", parse_mode="HTML")
+    # Используем ForceReply, чтобы пользователю было удобно вводить значение
+    await callback.message.answer(
+        f"✍️ Enter new value for <b>{key}</b>:", 
+        parse_mode="HTML",
+        reply_markup=types.ForceReply(selective=True)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "close_config")
+async def cb_close_config(callback: types.CallbackQuery):
+    with suppress(TelegramBadRequest):
+        await callback.message.delete()
     await callback.answer()
 
 @dp.message(EditState.waiting_for_value)
@@ -256,29 +248,16 @@ async def process_new_value(message: types.Message, state: FSMContext, user_cont
             
         config[key] = val
         save_user_config(user_context["config_file"], config)
-        await message.answer(f"✅ Saved: {key} = {val}\nTarget: {user_context['container']}\n\n⚠️ <b>Don't forget to RESTART!</b>", parse_mode="HTML", reply_markup=main_menu())
+        await message.answer(
+            f"✅ Saved: {key} = {val}\n⚠️ <b>Restart bot to apply!</b>", 
+            parse_mode="HTML"
+        )
     except ValueError:
-        await message.answer("❌ Invalid number format. Try again.")
-        return
+        await message.answer("❌ Invalid number format.")
 
     await state.clear()
 
-@dp.callback_query(F.data == "back")
-async def cb_back(callback: types.CallbackQuery):
-    await callback.message.edit_text("Main Menu", reply_markup=main_menu())
-
-# --- LIFECYCLE HANDLERS ---
-async def on_startup():
-    global docker_client
-    docker_client = Docker()
-    logger.info("Docker client attached.")
-
-async def on_shutdown():
-    if docker_client:
-        await docker_client.close()
-        logger.info("Docker client closed.")
-
-# --- LIFECYCLE HANDLERS ---
+# --- LIFECYCLE ---
 async def on_startup():
     global docker_client
     docker_client = Docker()
@@ -293,11 +272,8 @@ async def main():
     if not USER_MAP:
         logger.error("❌ NO USERS CONFIGURED!")
     
-    # Регистрируем Middleware
     dp.message.middleware(AccessMiddleware())
     dp.callback_query.middleware(AccessMiddleware())
-    
-    # Регистрируем startup/shutdown
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
@@ -305,7 +281,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    # Windows fix для asyncio loops (если запускаете локально на винде)
-    # if os.name == 'nt':
-    #     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())

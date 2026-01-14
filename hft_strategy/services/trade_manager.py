@@ -54,7 +54,7 @@ class TradeManager:
             if self.state != StrategyState.IDLE: return
 
             client_oid = str(uuid.uuid4())
-            logger.info(f"🚀 [ENTRY] {side} {qty} @ {entry_price} | TP: {take_profit} | SL: {stop_loss}")
+            logger.info(f"📡 [SIGNAL] Submitting Limit {side} {qty} @ {entry_price} | TP: {take_profit} | SL: {stop_loss}")
             
             # [FIX] Исправлена логика нотификации (IndentationError + NameErrors)
             if self.notifier:
