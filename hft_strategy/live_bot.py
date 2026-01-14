@@ -22,6 +22,7 @@ from hft_strategy.config import load_config, Config
 from hft_strategy.infrastructure.execution import BybitExecutionHandler
 from hft_strategy.services.smart_scanner import SmartMarketSelector
 from hft_strategy.strategies.adaptive_live_strategy import AdaptiveWallStrategy
+from hft_strategy.services.notification import TelegramNotifier # Импорт твоего класса
 
 # --- CONSTANTS ---
 RESCAN_INTERVAL_SEC = 300  # 5 минут между переоценкой рынка
@@ -281,6 +282,27 @@ class BotOrchestrator:
                 await asyncio.sleep(60)
 
     async def run(self):
+        # 1. Читаем настройки из переменных окружения (которые мы прописали в docker-compose)
+        tg_token = os.getenv("TG_NOTIFIER_TOKEN")
+        chat_id = os.getenv("TG_CHAT_ID")
+
+        # 2. Инициализируем нотификатор (если настройки есть)
+        notifier = None
+        if tg_token and chat_id:
+            notifier = TelegramNotifier(token=tg_token, chat_id=chat_id)
+            await notifier.start() # Запускаем сессию
+            logger.info(f"🔔 Notifications enabled for ID: {chat_id}")
+        else:
+            logger.warning("🔕 Notifications DISABLED (Token or ChatID missing)")
+
+        # 3. Передаем notifier в TradeManager
+        # (Убедись, что TradeManager принимает notifier в __init__)
+        self.trade_manager = TradeManager(
+            client=self.client,
+            symbol=self.symbol,
+            notifier=notifier,  # <--- ВОТ ЗДЕСЬ
+        
+        )
         self.running = True
         
         self.loop = asyncio.get_running_loop()
@@ -334,6 +356,8 @@ class BotOrchestrator:
         except Exception as e:
             self.logger.exception(f"Unexpected error: {e}")
         finally:
+            if notifier:
+                 await notifier.stop() # Не забываем закрыть сессию
             await self.shutdown()
 
     async def shutdown(self):

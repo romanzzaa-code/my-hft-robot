@@ -1,0 +1,15 @@
+{
+    "comment": "HFT Bot Configuration File. Edited by Telegram Commander.",
+    "target_coins": [
+        "ARCUSDT",
+        "RAVEUSDT",
+        "HMSTRUSDT",
+        "LIGHTUSDT",
+        "JELLYJELLYUSDT",
+        "BEATUSDT"
+    ],
+    "investment_usdt": 50,
+    "wall_ratio_threshold": 25.0,
+    "min_wall_value_usdt": 50000.0,
+    "vol_ema_alpha": 0.018955904607758676
+}

@@ -1,7 +1,6 @@
 version: '3.8'
 
 services:
-  # --- База данных (оставляем как было) ---
   timescaledb:
     image: timescale/timescaledb:latest-pg14
     container_name: hft_db
@@ -18,27 +17,61 @@ services:
       timeout: 5s
       retries: 5
 
-  # --- Твой робот (Добавляем!) ---
+  # Торговый робот (Slave)
+  # --- ТВОЙ БОТ ---
   bot:
-    build: .             # Строим из текущей папки
+    build: .
     container_name: hft_bot
-    restart: always      # Перезапускаем при ошибках
+    restart: unless-stopped
     volumes:
       - ./hft_strategy:/app/hft_strategy
+      # Твой файл strategy_params.json монтируется как основной
+      - ./config/strategy_params.json:/app/config/strategy_params.json
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      - BYBIT_API_KEY=${MY_API_KEY}       # Твои ключи (добавь их в .env с префиксом)
+      - BYBIT_API_SECRET=${MY_API_SECRET}
+      - TG_NOTIFIER_TOKEN=${TG_COMMANDER_TOKEN}
+      - TG_CHAT_ID=${TG_MY_ID}
     depends_on:
       timescaledb:
         condition: service_healthy
-    env_file:
-      - .env             # Берем ключи из .env файла
-    network_mode: "service:timescaledb" # Или networks: [default], если база в одной сети
+    network_mode: "service:timescaledb"
 
-  pgadmin:
-    image: dpage/pgadmin4
-    container_name: hft_pgadmin
+  # --- БОТ ДРУГА (ИЗОЛИРОВАННЫЙ) ---
+  bot_friend:
+    build: . # Использует тот же код!
+    container_name: hft_bot_friend
+    restart: unless-stopped
+    volumes:
+      - ./hft_strategy:/app/hft_strategy
+      # Файл друга friend_params.json монтируется КАК ОСНОВНОЙ ВНУТРЬ ЕГО КОНТЕЙНЕРА
+      - ./config/friend_params.json:/app/config/strategy_params.json
+      - ./logs_friend:/app/logs
+    env_file:
+      - .env
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@admin.com
-      PGADMIN_DEFAULT_PASSWORD: admin
-    ports:
-      - "5050:80"
+      - BYBIT_API_KEY=${FRIEND_API_KEY}     # Ключи друга
+      - BYBIT_API_SECRET=${FRIEND_API_SECRET}
+      - TG_NOTIFIER_TOKEN=${TG_COMMANDER_TOKEN}
+      - TG_CHAT_ID=${TG_FRIEND_ID}
+
     depends_on:
-      - timescaledb
+      timescaledb:
+        condition: service_healthy
+    network_mode: "service:timescaledb"
+
+  # --- КОМАНДИР ---
+  commander:
+    build: 
+      context: ./commander
+    container_name: hft_commander
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config:/app/config # Командир видит всю папку конфигов
+    env_file:
+      - .env
+    network_mode: "service:timescaledb"

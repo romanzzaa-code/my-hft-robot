@@ -16,15 +16,18 @@ except ImportError:
 logger = logging.getLogger("TRADE_MGR")
 
 class TradeManager:
-    def __init__(self, executor: IExecutionHandler, cfg: StrategyParameters, gateway: Optional[OrderGateway] = None):
+    def __init__(self, executor: IExecutionHandler, cfg: StrategyParameters, gateway: Optional[OrderGateway] = None, notifier=None):
         self.exec = executor
         self.gateway = gateway
         self.cfg = cfg
+        self.notifier = notifier
         self._stop_requested = False 
         self.state = StrategyState.IDLE
         self.ctx: Optional[TradeContext] = None
         self._tp_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()
+
+        self.logger = logging.getLogger(f"TradeManager-{symbol}")
     
     @property
     def can_be_deleted(self) -> bool:
@@ -48,6 +51,20 @@ class TradeManager:
 
             client_oid = str(uuid.uuid4())
             logger.info(f"🚀 [ENTRY] {side} {qty} @ {entry_price} | TP: {take_profit} | SL: {stop_loss}")
+            
+            if self.notifier:
+            try:
+                signal = TradeSignal(
+                    symbol=self.symbol,
+                    side=side,
+                    price=price,
+                    qty=qty,
+                    reason="Strategy Signal"
+                )
+                # status="OPEN" значит, что мы открываем сделку
+                self.notifier.send_trade(signal, status="OPEN") 
+            except Exception as e:
+                self.logger.error(f"Failed to send notification: {e}")
 
             # 1. C++ Gateway (Быстро)
             if self.gateway:
@@ -93,11 +110,13 @@ class TradeManager:
             # Вход (Entry)
             if self.ctx and (event.order_id == self.ctx.order_id or event.order_id.startswith("sim_")):
                 self.ctx.filled_qty += event.exec_qty
-                # Лог входа стал чуть подробнее
                 logger.info(f"🔵 [ENTRY] {self.cfg.symbol} | +{event.exec_qty} шт. по {event.exec_price}")
                 
                 if self.state == StrategyState.ORDER_PLACED:
                     self.state = StrategyState.IN_POSITION
+
+                # Call send_trade for entry
+                await self.exec.send_trade(event)
 
             # Выход (Exit)
             elif self.ctx and self.state == StrategyState.IN_POSITION:
@@ -105,7 +124,6 @@ class TradeManager:
                              (self.ctx.side == "Sell" and event.side == "Buy")
                 
                 if is_closing:
-                    # --- Блок красивого лога (не влияет на торговлю) ---
                     price_diff = (event.exec_price - self.ctx.entry_price) if self.ctx.side == "Buy" else (self.ctx.entry_price - event.exec_price)
                     realized_pnl = price_diff * event.exec_qty
                     
@@ -123,6 +141,9 @@ class TradeManager:
                         f"Price: {event.exec_price} | Остаток позы: {self.ctx.filled_qty:.4f}"
                     )
                     
+                    # Call send_trade for exit
+                    await self.exec.send_trade(event)
+                    
                     if self.ctx.filled_qty <= 1e-9:
                         logger.info(f"🏁 Сделка закрыта полностью. Жду новый сигнал.")
                         self.reset()
@@ -131,6 +152,12 @@ class TradeManager:
     async def cancel_entry(self, reason: str = "Unknown"):
         """Добавлен аргумент reason"""
         if self.state != StrategyState.ORDER_PLACED or not self.ctx: return
+
+        if self.notifier:
+             self.notifier.send_trade(
+                 TradeSignal(self.symbol, "None", 0, 0, reason="Timeout/Cancel"), 
+                 status="CANCEL"
+             )
         
         # Теперь мы видим ПОЧЕМУ мы отменяем
         logger.info(f"🚫 [CANCEL] {self.cfg.symbol} | Reason: {reason} | ID: {self.ctx.order_id}")
