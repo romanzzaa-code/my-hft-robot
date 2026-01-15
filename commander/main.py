@@ -251,9 +251,11 @@ async def process_new_value(message: types.Message, state: FSMContext, user_cont
         await message.answer(
             f"✅ Saved: {key} = {val}\n⚠️ <b>Restart bot to apply!</b>", 
             parse_mode="HTML"
+            reply_markup=main_menu()
         )
     except ValueError:
         await message.answer("❌ Invalid number format.")
+        reply_markup=main_menu()
 
     await state.clear()
 
