@@ -1,6 +1,7 @@
 # hft_strategy/infrastructure/local_order_book.py
 import time
 import logging
+from heapq import nlargest, nsmallest
 from typing import Dict, Any
 
 logger = logging.getLogger("LOB")
@@ -102,24 +103,22 @@ class LocalOrderBook:
 
     def get_background_volume(self) -> float:
         """
-        Рассчитывает среднюю ликвидность на уровнях 2-10 (Smart Scanner Logic).
-        Исключает спред, чтобы не реагировать на манипуляции маркет-мейкеров на 1-м уровне.
+        Оптимизированный расчет через Heapq.
+        O(N) вместо O(N log N).
         """
         if not self.bids or not self.asks:
             return 0.0
+        # Нам нужны топ 11 цен. nlargest/nsmallest эффективнее sorted для малых k.
+        top_bids = nlargest(11, self.bids.keys())
+        top_asks = nsmallest(11, self.asks.keys())
+        # Берем срез [1:11] -> уровни со 2-го по 11-й (10 уровней)
+        bg_bids_keys = top_bids[1:]
+        bg_asks_keys = top_asks[1:]
 
-        sorted_bids = sorted(self.bids.keys(), reverse=True)
-        sorted_asks = sorted(self.asks.keys())
-
-        # Берем срез [1:11] -> уровни со 2-го по 11-й
-        bg_bids_keys = sorted_bids[1:11] 
-        bg_asks_keys = sorted_asks[1:11]
-        
         volumes = []
         for p in bg_bids_keys: volumes.append(self.bids[p])
         for p in bg_asks_keys: volumes.append(self.asks[p])
         
         if not volumes:
             return 0.0
-            
         return sum(volumes) / len(volumes)

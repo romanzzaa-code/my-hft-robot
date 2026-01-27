@@ -103,9 +103,9 @@ PYBIND11_MODULE(hft_core, m) {
         .def("add_symbol", &ExchangeStreamer::add_symbol)
         .def("start", &ExchangeStreamer::start, py::call_guard<py::gil_scoped_release>())
         .def("stop", &ExchangeStreamer::stop, py::call_guard<py::gil_scoped_release>())
-        .def("set_tick_callback", [](ExchangeStreamer &self, std::function<void(const TickData&)> cb) {
-            self.set_tick_callback([cb](const TickData& t) {
-                py::gil_scoped_acquire acquire;
+        .def("set_tick_callback", [](ExchangeStreamer &self, std::function<void(const std::vector<TickData>&)> cb) {
+            self.set_tick_callback([cb](const std::vector<TickData>& t) {
+                py::gil_scoped_acquire acquire; // GIL берется 1 раз на пачку
                 cb(t);
             });
         })

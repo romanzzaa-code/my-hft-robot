@@ -35,11 +35,13 @@ class MarketBridge:
         logger.info(f"✅ MarketBridge initialized for {ws_url}")
 
     # --- CALLBACKS ---
-    def _on_cpp_tick(self, tick):
-        # Фильтруем тики только для активных монет (чтобы не засорять очередь)
-        if tick.symbol in self.active_heavy_symbols:
-            setattr(tick, 'type', 'trade') 
-            self.loop.call_soon_threadsafe(self.tick_queue.put_nowait, tick)
+    def _on_cpp_tick(self, ticks: List[Any]):
+        # Теперь получаем список тиков, обрабатываем каждый в цикле
+        for tick in ticks:
+            # Фильтруем тики только для активных монет
+            if tick.symbol in self.active_heavy_symbols:
+                setattr(tick, 'type', 'trade')
+                self.loop.call_soon_threadsafe(self.tick_queue.put_nowait, tick)
 
     def _on_cpp_depth(self, snapshot):
         if snapshot.symbol in self.active_heavy_symbols:

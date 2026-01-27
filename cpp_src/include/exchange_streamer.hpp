@@ -20,7 +20,7 @@ public:
     // Добавляем этот метод, чтобы main.cpp не ругался
     void add_symbol(const std::string& symbol); 
 
-    void set_tick_callback(std::function<void(const TickData&)> cb);
+    void set_tick_callback(std::function<void(const std::vector<TickData>&)> cb);
     
     // Внимание: называем это set_orderbook_callback, чтобы совпадало с main.cpp
     // ИЛИ меняем в main.cpp. Давай поменяем тут, это проще.
@@ -36,7 +36,7 @@ private:
     std::vector<std::string> symbols_;
     bool running_ = false;
 
-    std::function<void(const TickData&)> tick_cb_;
+    std::function<void(const std::vector<TickData>&)> tick_cb_;
     std::function<void(const OrderBookSnapshot&)> depth_cb_;
     std::function<void(const ExecutionData&)> exec_cb_;
 };

@@ -43,7 +43,7 @@ void ExchangeStreamer::stop() {
     webSocket.stop();
 }
 
-void ExchangeStreamer::set_tick_callback(std::function<void(const TickData&)> cb) {
+void ExchangeStreamer::set_tick_callback(std::function<void(const std::vector<TickData>&)> cb) {
     tick_cb_ = cb;
 }
 
@@ -77,17 +77,20 @@ void ExchangeStreamer::on_message(const ix::WebSocketMessagePtr& msg) {
     // 2. Обработка данных
     else if (msg->type == ix::WebSocketMessageType::Message) {
         if (parser_) {
-            TickData tick;
+            std::vector<TickData> ticks; // CHANGE
             OrderBookSnapshot depth;
             TickerData ticker;
             ExecutionData exec;
             
             // Парсим сообщение
-            ParseResultType res = parser_->parse(msg->str, tick, depth, ticker, exec);
+            ParseResultType res = parser_->parse(msg->str, ticks, depth, ticker, exec);
             
             // Роутинг
             if (res == ParseResultType::Trade && tick_cb_) {
-                tick_cb_(tick);
+                // Вызываем Python ОДИН раз для пачки из N сделок
+                if (!ticks.empty()) {
+                    tick_cb_(ticks);
+                }
             } 
             else if (res == ParseResultType::Depth && depth_cb_) {
                 depth_cb_(depth);

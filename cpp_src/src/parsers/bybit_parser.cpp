@@ -37,7 +37,7 @@ static double extract_from_result(simdjson::simdjson_result<simdjson::ondemand::
 
 ParseResultType BybitParser::parse(
     const std::string& payload, 
-    TickData& out_tick, 
+    std::vector<TickData>& out_ticks,
     OrderBookSnapshot& out_depth,
     TickerData& out_ticker,
     ExecutionData& out_exec
@@ -113,6 +113,11 @@ ParseResultType BybitParser::parse(
         else if (topic_sv.find("publicTrade") != std::string_view::npos) {
             simdjson::ondemand::array data_arr;
             if (!obj["data"].get(data_arr)) {
+                // Очищаем вектор перед записью новой пачки
+                out_ticks.clear();
+                // Резервируем память, чтобы избежать аллокаций при push_back
+                // Обычно в пакете 1-100 сделок.
+                out_ticks.reserve(100);
                 for (auto trade_val : data_arr) {
                     auto trade_obj = trade_val.get_object();
                     double price = 0.0; double vol = 0.0; int64_t ts = 0; std::string symbol_str;
@@ -133,9 +138,13 @@ ParseResultType BybitParser::parse(
                     }
 
                     if (price > 0) {
-                        out_tick = {symbol_str, price, vol, ts};
-                        return ParseResultType::Trade; 
+                        // CHANGE: Push to vector instead of return
+                        out_ticks.emplace_back(TickData{symbol_str, price, vol, ts, "Unknown"});
+                        // Side обычно нужно парсить отдельно (L/S), но пока оставим так
                     }
+                }
+                if (!out_ticks.empty()) {
+                    return ParseResultType::Trade;
                 }
             }
         }

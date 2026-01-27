@@ -1,16 +1,17 @@
 #pragma once
 #include "imessage_parser.hpp"
 #include <simdjson.h>
+#include <vector>
 
 class BinanceParser : public IMessageParser {
 public:
     // Обновляем сигнатуру метода, чтобы она соответствовала интерфейсу IMessageParser
     ParseResultType parse(
         const std::string& payload, 
-        TickData& out_tick, 
+        std::vector<TickData>& out_ticks,
         OrderBookSnapshot& out_depth,
         TickerData& out_ticker,
-        ExecutionData& out_exec // <--- Добавили обязательный аргумент
+        ExecutionData& out_exec
     ) override;
 
 private:

@@ -29,7 +29,7 @@ static double extract_double(simdjson::ondemand::value val) {
 
 ParseResultType BinanceParser::parse(
     const std::string& payload, 
-    TickData& out_tick, 
+    std::vector<TickData>& out_ticks,
     OrderBookSnapshot& out_depth,
     TickerData& out_ticker,
     ExecutionData& out_exec 
@@ -59,8 +59,14 @@ ParseResultType BinanceParser::parse(
         }
 
         if (price > 0) {
-            out_tick = {symbol_str, price, vol, ts};
-            return ParseResultType::Trade;
+            // CHANGE: Push to vector instead of return
+            out_ticks.clear();
+            out_ticks.reserve(100);
+            out_ticks.emplace_back(TickData{symbol_str, price, vol, ts, "Unknown"});
+
+            if (!out_ticks.empty()) {
+                return ParseResultType::Trade;
+            }
         }
 
     } catch (...) {
