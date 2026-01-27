@@ -241,6 +241,7 @@ async def process_new_value(message: types.Message, state: FSMContext, user_cont
     
     config = load_user_config(user_context["config_file"])
     try:
+        # Валидация типов (Domain Logic leak inside Controller - допустимо для MVP, но лучше вынести)
         if "." in user_val:
             val = float(user_val)
         else:
@@ -248,14 +249,18 @@ async def process_new_value(message: types.Message, state: FSMContext, user_cont
             
         config[key] = val
         save_user_config(user_context["config_file"], config)
+        
+        # [FIX] ВОССТАНАВЛИВАЕМ МЕНЮ ЗДЕСЬ
         await message.answer(
             f"✅ Saved: {key} = {val}\n⚠️ <b>Restart bot to apply!</b>", 
-            parse_mode="HTML"
-            reply_markup=main_menu()
+            parse_mode="HTML",
+            reply_markup=main_menu()  # <--- КРИТИЧЕСКИ ВАЖНОЕ ИЗМЕНЕНИЕ
         )
     except ValueError:
-        await message.answer("❌ Invalid number format.")
-        reply_markup=main_menu()
+        await message.answer(
+            "❌ Invalid number format.",
+            reply_markup=main_menu() # Здесь тоже стоит вернуть меню, если мы выходим из состояния
+        )
 
     await state.clear()
 
