@@ -35,13 +35,28 @@ class MarketBridge:
         logger.info(f"✅ MarketBridge initialized for {ws_url}")
 
     # --- CALLBACKS ---
-    def _on_cpp_tick(self, ticks: List[Any]):
-        # Теперь получаем список тиков, обрабатываем каждый в цикле
-        for tick in ticks:
-            # Фильтруем тики только для активных монет
-            if tick.symbol in self.active_heavy_symbols:
-                setattr(tick, 'type', 'trade')
-                self.loop.call_soon_threadsafe(self.tick_queue.put_nowait, tick)
+    def _on_cpp_tick(self, data: Any):
+        """
+        Callback from C++. 
+        Thread-safe bridge to asyncio loop.
+        """
+        # Если пришел список (батч)
+        if isinstance(data, list):
+            # ОПТИМИЗАЦИЯ: Фильтрация и тегирование в один проход
+            batch = []
+            for t in data:
+                if t.symbol in self.active_heavy_symbols:
+                    # Важно: тегируем каждый объект, так как db_writer проверяет .type у каждого
+                    setattr(t, 'type', 'trade') 
+                    batch.append(t)
+            if batch:
+                # Отправляем весь пакет
+                self.loop.call_soon_threadsafe(self.tick_queue.put_nowait, batch)
+        # Если пришел одиночный тик (Legacy)
+        elif hasattr(data, 'symbol'):
+            if data.symbol in self.active_heavy_symbols:
+                setattr(data, 'type', 'trade')
+                self.loop.call_soon_threadsafe(self.tick_queue.put_nowait, data)
 
     def _on_cpp_depth(self, snapshot):
         if snapshot.symbol in self.active_heavy_symbols:
@@ -178,4 +193,15 @@ class MarketBridge:
             await asyncio.sleep(0.02) 
 
     async def get_tick(self):
-        return await self.tick_queue.get()
+        """
+        Получает данные из очереди.
+        Может вернуть как одиночный тик (Legacy), так и батч (Optimized C++).
+        """
+        item = await self.tick_queue.get()
+        
+        # Если пришел батч (новый C++ модуль)
+        if isinstance(item, list):
+            # Возвращаем батч как есть - пусть вызывающий код разбирается
+            return item
+        # Одиночный тик (Legacy)
+        return item

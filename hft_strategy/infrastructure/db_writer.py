@@ -57,6 +57,19 @@ class BufferedTickWriter:
         self._flush_task = asyncio.create_task(self._periodic_flush())
 
     async def add_event(self, event: Any):
+        """
+        Принимает как одиночное событие, так и батч событий.
+        """
+        # Если пришел батч (новый C++ модуль)
+        if isinstance(event, list):
+            for single_event in event:
+                await self._process_single_event(single_event)
+        else:
+            # Одиночное событие (Legacy)
+            await self._process_single_event(event)
+        
+    async def _process_single_event(self, event: Any):
+        """Обрабатывает одиночное событие."""
         if not self._running: return
         event_type = getattr(event, 'type', 'unknown')
         

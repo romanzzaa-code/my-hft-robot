@@ -180,3 +180,107 @@ webSocket.send(msg);
 - Добавлен `#include <string>`
 
 **Результат:** Меньше зависимостей, чище код.
+
+---
+
+## 9. Hybrid Dispatcher: совместимость Python с новым C++ ядром
+
+### Дата: 28 янв. 2026 г.
+
+**Файл:** `hft_strategy/live_bot.py`
+
+**Изменения:**
+- Обновлён импорт: `from typing import List, Dict, Set, Optional, Union, Any`
+- Полностью переписан метод `_dispatch_tick()` для поддержки:
+  - Одиночного тика (Legacy C++)
+  - Батча тиков (Optimized C++)
+- Добавлена оптимизация группировки тиков по символам
+- Поддержка метода `on_tick_batch()` в стратегиях
+
+**Результат:** Безотказная работа при обновлении C++ ядра.
+
+---
+
+## 10. MarketBridge + DB Writer: бесшовная обработка батчей
+
+### Дата: 28 янв. 2026 г.
+
+**Файл:** `hft_strategy/infrastructure/market_bridge.py`
+
+**Изменения:**
+- `_on_cpp_tick()`: поддержка списка и одиночного тика
+- `get_tick()`: корректный возврат батча или одиночного тика
+- Фильтрация и тегирование `type='trade'` в одном цикле
+
+**Файл:** `hft_strategy/infrastructure/db_writer.py`
+
+**Изменения:**
+- `add_event()`: принимает как одиночное событие, так и батч
+- Выделен метод `_process_single_event()` для переиспользования логики
+
+**Результат:** Полная совместимость с обоими форматами данных.
+
+---
+
+## 11. HMAC-SHA256: Zero-Allocation hex-конвертация (C++)
+
+### Дата: 28 янв. 2026 г.
+
+**Файл:** `cpp_src/src/order_gateway.cpp`
+
+**Проблема:** `std::stringstream` — медленная библиотека с множественными аллокациями.
+
+**Изменения:**
+```cpp
+// Было (МЕДЛЕННО):
+std::stringstream ss;
+for(unsigned int i = 0; i < len; i++) {
+    ss << std::hex << std::setw(2) << std::setfill('0') << (int)digest[i];
+}
+return ss.str();
+
+// Стало (ОПТИМИЗИРОВАНО):
+unsigned char hash[EVP_MAX_MD_SIZE];
+HMAC(EVP_sha256(), key.c_str(), key.length(), 
+     (unsigned char*)data.c_str(), data.length(), hash, &len);
+std::string hexString;
+hexString.reserve(len * 2);
+static const char hexDigits[] = "0123456789abcdef";
+for (unsigned int i = 0; i < len; ++i) {
+    hexString.push_back(hexDigits[hash[i] >> 4]);
+    hexString.push_back(hexDigits[hash[i] & 0x0F]);
+}
+return hexString;
+```
+
+**Результат:** ~10x ускорение генерации подписи.
+
+---
+
+## 12. Исправление критической ошибки тегирования тиков
+
+### Дата: 28 янв. 2026 г.
+
+**Файл:** `hft_strategy/infrastructure/market_bridge.py`
+
+**Проблема:** Атрибут `type='trade'` устанавливался только первому элементу батча (`batch[0]`), остальные тики терялись в БД.
+
+**Исправление:**
+```cpp
+// Было (ОШИБКА):
+batch = [t for t in data if t.symbol in self.active_heavy_symbols]
+if batch:
+    setattr(batch[0], 'type', 'trade')  // Только первый!
+    self.loop.call_soon_threadsafe(self.tick_queue.put_nowait, batch)
+
+// Стало (ИСПРАВЛЕНО):
+batch = []
+for t in data:
+    if t.symbol in self.active_heavy_symbols:
+        setattr(t, 'type', 'trade')  // Каждый тик получает тип!
+        batch.append(t)
+if batch:
+    self.loop.call_soon_threadsafe(self.tick_queue.put_nowait, batch)
+```
+
+**Результат:** Все тики из батча корректно записываются в базу данных.

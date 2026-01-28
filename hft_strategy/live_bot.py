@@ -6,7 +6,7 @@ import signal
 import sys
 import os
 import copy
-from typing import List, Dict, Set, Optional
+from typing import List, Dict, Set, Optional, Union, Any
 
 # --- PATH HACK ---
 sys.path.append(os.getcwd())
@@ -124,9 +124,38 @@ class BotOrchestrator:
             return []
 
     # --- ROUTING DISPATCHERS (Маршрутизаторы) ---
-    def _dispatch_tick(self, tick):
-        if tick.symbol in self.strategies:
-            self.strategies[tick.symbol].on_tick(tick)
+    def _dispatch_tick(self, tick_data):
+        """
+        Универсальный диспетчер.
+        Принимает как одиночный тик (Legacy C++), так и батч (Optimized C++).
+        Гарантирует отсутствие падения при обновлении ядра.
+        """
+        # Проверяем, пришел ли нам список (новый C++)
+        if isinstance(tick_data, list):
+            # ОПТИМИЗАЦИЯ: Группируем тики по символам для снижения Overhead
+            # Это уменьшает количество lookup'ов в self.strategies в N раз
+            grouped_ticks = {}
+            for tick in tick_data:
+                if tick.symbol not in grouped_ticks:
+                    grouped_ticks[tick.symbol] = []
+                grouped_ticks[tick.symbol].append(tick)
+            
+            # Рассылаем уже сгруппированные пачки
+            for symbol, batch in grouped_ticks.items():
+                if symbol in self.strategies:
+                    strategy = self.strategies[symbol]
+                    # Если стратегия умеет принимать батчи - кидаем батч (идеально)
+                    if hasattr(strategy, 'on_tick_batch'):
+                        strategy.on_tick_batch(batch)
+                    else:
+                        # Иначе скармливаем по одному (совместимость)
+                        for t in batch:
+                            strategy.on_tick(t)
+        else:
+            # Старый режим (один тик) - работает как вчера
+            tick = tick_data
+            if tick.symbol in self.strategies:
+                self.strategies[tick.symbol].on_tick(tick)
 
     def _dispatch_depth(self, snapshot):
         if snapshot.symbol in self.strategies and self.loop:

@@ -43,6 +43,7 @@ data/
 # --- IDE & OS Junk ---
 .vscode/
 .idea/
+.kilocode/rules
 .DS_Store
 Thumbs.db
 *.swp

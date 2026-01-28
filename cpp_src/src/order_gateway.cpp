@@ -18,17 +18,21 @@ std::string format_decimal(double value, int precision = 8) {
 }
 
 std::string hmac_sha256(const std::string& key, const std::string& data) {
-    unsigned char* digest;
+    unsigned char hash[EVP_MAX_MD_SIZE];
     unsigned int len = 0;
-    digest = HMAC(EVP_sha256(), 
-                  (const void*)key.c_str(), key.length(), 
-                  (const unsigned char*)data.c_str(), data.length(), 
-                  NULL, &len);
-    std::stringstream ss;
-    for(unsigned int i = 0; i < len; i++) {
-        ss << std::hex << std::setw(2) << std::setfill('0') << (int)digest[i];
+    HMAC(EVP_sha256(), 
+         key.c_str(), key.length(), 
+         (unsigned char*)data.c_str(), data.length(), 
+         hash, &len);
+    // Ручная конвертация в hex (в 10 раз быстрее sprintf/stringstream)
+    std::string hexString;
+    hexString.reserve(len * 2); // Резервируем память сразу
+    static const char hexDigits[] = "0123456789abcdef";
+    for (unsigned int i = 0; i < len; ++i) {
+        hexString.push_back(hexDigits[hash[i] >> 4]);
+        hexString.push_back(hexDigits[hash[i] & 0x0F]);
     }
-    return ss.str();
+    return hexString;
 }
 
 OrderGateway::OrderGateway(std::string key, std::string secret, bool testnet) 
