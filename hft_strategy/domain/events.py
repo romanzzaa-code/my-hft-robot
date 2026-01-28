@@ -13,7 +13,7 @@ logger = logging.getLogger("DOMAIN")
 
 # --- DOMAIN ENTITIES (DTOs) ---
 
-@dataclass
+@dataclass(slots=True)
 class TradeSignal:
     """
     Объект-значение (Value Object), представляющий решение стратегии о сделке.

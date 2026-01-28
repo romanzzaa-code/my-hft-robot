@@ -17,7 +17,8 @@ dependencies = [
     "numpy",
     "python-dotenv",
     "pandas",
-    "pytz"
+    "pytz",
+    "uvloop"
 ]
 
 [tool.scikit-build]

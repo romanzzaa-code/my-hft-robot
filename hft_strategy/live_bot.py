@@ -1,4 +1,17 @@
 # hft_strategy/live_bot.py
+
+# --- RUNTIME OPTIMIZATIONS (HFT CRITICAL) ---
+# 1. uvloop: Ускорение Event Loop в 2-4x (libuv wrapper, как в Node.js)
+try:
+    import uvloop
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    print("🚀 uvloop enabled")
+except ImportError:
+    print("⚠️ uvloop not installed, using default asyncio loop")
+
+# 2. gc: Управление сборщиком мусора для предотвращения stop-the-world пауз
+import gc
+
 import asyncio
 import logging
 from logging.handlers import TimedRotatingFileHandler
@@ -238,6 +251,9 @@ class BotOrchestrator:
         while self.running:
             try:
                 await asyncio.sleep(RESCAN_INTERVAL_SEC)
+                # РУЧНОЙ СБОР МУСОРА (когда мы не торгуем или меняем монеты)
+                # Безопасно делать раз в 5 минут
+                gc.collect()
                 self.logger.info("🕵️ Periodic Market Rescan triggered...")
                 
                 new_top_coins = await self._find_best_assets(limit=MAX_COINS_TO_TRADE)
@@ -280,6 +296,10 @@ class BotOrchestrator:
                 await asyncio.sleep(60)
 
     async def run(self):
+        # ОТКЛЮЧАЕМ GC ПЕРЕД ЗАПУСКОМ (HFT critical)
+        gc.disable()
+        self.logger.info("🗑️ Automatic GC DISABLED for performance")
+
         # 1. Читаем настройки из переменных окружения
         tg_token = os.getenv("TG_NOTIFIER_TOKEN")
         chat_id = os.getenv("TG_CHAT_ID")

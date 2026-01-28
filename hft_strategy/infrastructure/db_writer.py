@@ -58,33 +58,68 @@ class BufferedTickWriter:
 
     async def add_event(self, event: Any):
         """
+        Optimized Entry Point.
         Принимает как одиночное событие, так и батч событий.
         """
         # Если пришел батч (новый C++ модуль)
         if isinstance(event, list):
-            for single_event in event:
-                await self._process_single_event(single_event)
+            # ✅ FAST PATH: Синхронная обработка всей пачки
+            self._process_batch_sync(event)
+            # Проверяем буферы (один await на весь батч)
+            if len(self.tick_buffer) >= self.batch_size:
+                await self._flush_ticks()
+            if len(self.depth_buffer) >= 10:
+                await self._flush_depth()
         else:
             # Одиночное событие (Legacy)
-            await self._process_single_event(event)
-        
-    async def _process_single_event(self, event: Any):
-        """Обрабатывает одиночное событие."""
-        if not self._running: return
-        event_type = getattr(event, 'type', 'unknown')
-        
+            self._process_single_sync(event)
+            if len(self.tick_buffer) >= self.batch_size:
+                await self._flush_ticks()
+            if len(self.depth_buffer) >= 10:
+                await self._flush_depth()
+
+    def _process_batch_sync(self, events: List[Any]):
+        """
+        Обработка списка без await.
+        ОПТИМИЗАЦИЯ: Определяем тип по первому элементу.
+        Считаем, что в пачке всегда однородные данные.
+        """
+        if not self._running or not events:
+            return
+
+        first = events[0]
+        etype = getattr(first, 'type', 'unknown')
         local_dt = datetime.now(timezone.utc)
-        # [FIX] Исправлено деление на 1000.0 (было 100.0)
+        tz = timezone.utc
+
+        if etype == 'trade':
+            # List Comprehension в 2 раза быстрее цикла for с append
+            new_rows = [
+                (local_dt, datetime.fromtimestamp(e.timestamp / 1000.0, tz=tz),
+                 e.symbol, e.price, e.volume, None)
+                for e in events
+            ]
+            self.tick_buffer.extend(new_rows)
+        elif etype == 'depth':
+            for e in events:
+                bids_json, asks_json = MarketDataSerializer.serialize_depth(e.bids, e.asks)
+                exch_dt = datetime.fromtimestamp(e.timestamp / 1000.0, tz=tz)
+                self.depth_buffer.append((local_dt, exch_dt, e.symbol, bids_json, asks_json, e.is_snapshot))
+
+    def _process_single_sync(self, event: Any):
+        """Обрабатывает одиночное событие синхронно."""
+        if not self._running:
+            return
+
+        etype = getattr(event, 'type', 'unknown')
+        local_dt = datetime.now(timezone.utc)
         exch_dt = datetime.fromtimestamp(event.timestamp / 1000.0, tz=timezone.utc)
 
-        if event_type == 'trade':
+        if etype == 'trade':
             self.tick_buffer.append((local_dt, exch_dt, event.symbol, event.price, event.volume, None))
-        elif event_type == 'depth':
+        elif etype == 'depth':
             bids_json, asks_json = MarketDataSerializer.serialize_depth(event.bids, event.asks)
             self.depth_buffer.append((local_dt, exch_dt, event.symbol, bids_json, asks_json, event.is_snapshot))
-
-        if len(self.tick_buffer) >= self.batch_size: await self._flush_ticks()
-        if len(self.depth_buffer) >= 10: await self._flush_depth()
 
     async def _flush(self):
         await self._flush_ticks()
