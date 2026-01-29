@@ -858,6 +858,89 @@ hft_strategy/
 # 🔥 HFT Robot Project Context (Restore Point)
 **Date:** 28.01.2026
 **Role:** Lead Quantitative Developer (Code Critic Persona)
+**Status:** Phase 4.5 Completed (Multi-User Support & UI Stability)
+
+## 🎯 Цель проекта
+Создание самообучающегося HFT-робота для скальпинга "от плотностей" (Wall Bounce) на Bybit (Master Trader Copytrading).
+**Текущий фокус:** Поддержка нескольких пользователей (Multi-User) и стабильность Telegram-интерфейса.
+
+---
+
+## 🏗 Текущая Архитектура (Multi-User & Persistent UI)
+Внедрены ключевые улучшения для совместной работы с другом и стабильности интерфейса:
+
+1.  **User Context Isolation:**
+    -   `UserContextManager` хранит состояние для каждого `chat_id` отдельно.
+    -   Контекст включает: `active_symbol`, `current_menu`, `last_message_id`, `config_data`.
+    -   Теперь настройка BTCUSDT у одного пользователя не влияет на ETHUSDT у другого.
+
+2.  **Persistent Menu:**
+    -   `ReplyKeyboardMarkup` с флагом `is_persistent=True`.
+    -   Меню остается внизу экрана даже после 100+ уведомлений о сделках.
+
+3.  **UI Stability:**
+    -   Все `edit_text()` вызовы сохраняют `reply_markup=main_menu()`.
+    -   При редактировании сообщения кнопки не исчезают.
+
+---
+
+## ✅ Что сделано (Completed Tasks)
+
+### 1. User Context Manager (commander/main.py)
+* **New Class:** `UserContextManager` с методами:
+  - `get_context(chat_id)` — получение/создание контекста
+  - `update_context(chat_id, **kwargs)` — обновление полей
+  - `clear_context(chat_id)` — очистка контекста
+* **Context Structure:**
+  ```python
+  {
+      "active_symbol": None,      # активный символ торгов
+      "current_menu": "MAIN",     # текущее меню
+      "last_message_id": None,    # ID последнего сообщения
+      "config_data": None         # кэш данных конфига
+  }
+  ```
+* **Integration:** Обновлены все обработчики (`msg_status`, `msg_config`, `cb_edit_value`, и др.) для использования `user_context_manager`.
+
+### 2. Notification Fix (services/notification.py)
+* **Back Button:** Добавлена inline-кнопка «🔙 Вернуться в меню» в каждое уведомление о сделке.
+* **No Deletion:** Уведомления отправляются через `send_message` без удаления старых сообщений.
+
+### 3. Callback Answer Fix (commander/main.py)
+* **Mandatory Answer:** Добавлен `await callback.answer()` во все callback-обработчики:
+  - `cb_edit_value`
+  - `cb_close_config`
+  - `cb_back_to_menu`
+* **Effect:** Убраны "часики" на кнопках, предотвращены зависания при одновременных нажатиях.
+
+### 4. Menu Preservation (commander/main.py)
+* **Edit Text Fix:** Все `edit_message_text()` теперь передают `reply_markup=main_menu()`:
+  - `msg_logs` — при обновлении логов
+  - `msg_restart` — при обновлении статуса
+  - `msg_stop` — при обновлении статуса
+* **Persistent Reply Keyboard:** `main_menu()` использует `is_persistent=True`.
+
+### 5. Back to Menu Handler (commander/main.py)
+* **New Handler:** `cb_back_to_menu` восстанавливает Reply-клавиатуру после уведомлений о сделках.
+
+---
+
+## 📂 Структура файлов (Изменения)
+```text
+commander/
+├── main.py                  (ADDED: UserContextManager, is_persistent=True, callback.answer())
+└── ...
+
+hft_strategy/
+└── services/
+    └── notification.py      (ADDED: Back to menu inline button)
+```
+
+---
+
+# 🔥 HFT Robot Project Context (Restore Point)
+**Date:** 28.01.2026
+**Role:** Lead Quantitative Developer (Code Critic Persona)
 **Status:** Phase 4.4 Completed (Zombie Mode Fix & HFT Principles Applied)
 
 ## 🎯 Цель проекта
@@ -912,3 +995,86 @@ hft_strategy/
 ├── infrastructure/
 │   └── execution.py        (Verified: on_execution called correctly)
 └── live_bot.py             (Verified: _dispatch_execution routing)
+
+---
+
+# 🔥 HFT Robot Project Context (Restore Point)
+**Date:** 28.01.2026
+**Role:** Lead Quantitative Developer (Code Critic Persona)
+**Status:** Phase 4.5 Completed (Multi-User Support & UI Stability)
+
+## 🎯 Цель проекта
+Создание самообучающегося HFT-робота для скальпинга "от плотностей" (Wall Bounce) на Bybit (Master Trader Copytrading).
+**Текущий фокус:** Поддержка нескольких пользователей (Multi-User) и стабильность Telegram-интерфейса.
+
+---
+
+## 🏗 Текущая Архитектура (Multi-User & Persistent UI)
+Внедрены ключевые улучшения для совместной работы с другом и стабильности интерфейса:
+
+1.  **User Context Isolation:**
+    -   `UserContextManager` хранит состояние для каждого `chat_id` отдельно.
+    -   Контекст включает: `active_symbol`, `current_menu`, `last_message_id`, `config_data`.
+    -   Теперь настройка BTCUSDT у одного пользователя не влияет на ETHUSDT у другого.
+
+2.  **Persistent Menu:**
+    -   `ReplyKeyboardMarkup` с флагом `is_persistent=True`.
+    -   Меню остается внизу экрана даже после 100+ уведомлений о сделках.
+
+3.  **UI Stability:**
+    -   Все `edit_text()` вызовы сохраняют `reply_markup=main_menu()`.
+    -   При редактировании сообщения кнопки не исчезают.
+
+---
+
+## ✅ Что сделано (Completed Tasks)
+
+### 1. User Context Manager (commander/main.py)
+* **New Class:** `UserContextManager` с методами:
+  - `get_context(chat_id)` — получение/создание контекста
+  - `update_context(chat_id, **kwargs)` — обновление полей
+  - `clear_context(chat_id)` — очистка контекста
+* **Context Structure:**
+  ```python
+  {
+      "active_symbol": None,      # активный символ торгов
+      "current_menu": "MAIN",     # текущее меню
+      "last_message_id": None,    # ID последнего сообщения
+      "config_data": None         # кэш данных конфига
+  }
+  ```
+* **Integration:** Обновлены все обработчики (`msg_status`, `msg_config`, `cb_edit_value`, и др.) для использования `user_context_manager`.
+
+### 2. Notification Fix (services/notification.py)
+* **Back Button:** Добавлена inline-кнопка «🔙 Вернуться в меню» в каждое уведомление о сделке.
+* **No Deletion:** Уведомления отправляются через `send_message` без удаления старых сообщений.
+
+### 3. Callback Answer Fix (commander/main.py)
+* **Mandatory Answer:** Добавлен `await callback.answer()` во все callback-обработчики:
+  - `cb_edit_value`
+  - `cb_close_config`
+  - `cb_back_to_menu`
+* **Effect:** Убраны "часики" на кнопках, предотвращены зависания при одновременных нажатиях.
+
+### 4. Menu Preservation (commander/main.py)
+* **Edit Text Fix:** Все `edit_message_text()` теперь передают `reply_markup=main_menu()`:
+  - `msg_logs` — при обновлении логов
+  - `msg_restart` — при обновлении статуса
+  - `msg_stop` — при обновлении статуса
+* **Persistent Reply Keyboard:** `main_menu()` использует `is_persistent=True`.
+
+### 5. Back to Menu Handler (commander/main.py)
+* **New Handler:** `cb_back_to_menu` восстанавливает Reply-клавиатуру после уведомлений о сделках.
+
+---
+
+## 📂 Структура файлов (Изменения)
+```text
+commander/
+├── main.py                  (ADDED: UserContextManager, is_persistent=True, callback.answer())
+└── ...
+
+hft_strategy/
+└── services/
+    └── notification.py      (ADDED: Back to menu inline button)
+```

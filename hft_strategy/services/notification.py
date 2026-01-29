@@ -2,10 +2,20 @@
 import aiohttp
 import logging
 import asyncio
+import json
 from typing import Optional
 from dataclasses import dataclass
 
 logger = logging.getLogger("NOTIFIER")
+
+
+def make_back_inline_kb():
+    """Создать inline-кнопку возврата в меню."""
+    kb = {
+        "inline_keyboard": [[{"text": "🔙 Вернуться в меню", "callback_data": "back_to_menu"}]]
+    }
+    return json.dumps(kb)
+
 
 class TelegramNotifier:
     def __init__(self, token: str, chat_id: str):
@@ -32,7 +42,8 @@ class TelegramNotifier:
         """
         Метод 'Fire-and-Forget'. Не блокирует HFT цикл.
         """
-        if not self.running: return
+        if not self.running:
+            return
         self.queue.put_nowait({
             "type": "trade",
             "signal": signal,
@@ -61,15 +72,20 @@ class TelegramNotifier:
                 logger.error(f"Notification worker error: {e}")
                 
     async def _send_trade_msg(self, signal, status, pnl):
-        if not self.session: return
-        
+        if not self.session:
+            return
+
         # Выбираем эмодзи
         emoji = "🚀"
-        if status == "CANCEL": emoji = "🚫"
-        elif status == "PROFIT": emoji = "✅"
-        elif status == "LOSS": emoji = "❌"
-        elif status == "OPEN": emoji = "🔵"
-        
+        if status == "CANCEL":
+            emoji = "🚫"
+        elif status == "PROFIT":
+            emoji = "✅"
+        elif status == "LOSS":
+            emoji = "❌"
+        elif status == "OPEN":
+            emoji = "🔵"
+
         # Формируем сообщение
         lines = [
             f"{emoji} <b>{status}</b> {signal.symbol}",
@@ -90,7 +106,8 @@ class TelegramNotifier:
         payload = {
             "chat_id": self.chat_id,
             "text": msg,
-            "parse_mode": "HTML"
+            "parse_mode": "HTML",
+            "reply_markup": make_back_inline_kb()  # Добавляем кнопку возврата
         }
         
         try:

@@ -49,6 +49,37 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 docker_client = None
 
+# --- USER CONTEXT MANAGER ---
+class UserContextManager:
+    """Менеджер контекстов пользователей для хранения состояний бота."""
+    
+    def __init__(self):
+        self.contexts: Dict[int, Dict[str, Any]] = {}
+    
+    def get_context(self, chat_id: int) -> Dict[str, Any]:
+        """Получить или создать контекст пользователя."""
+        if chat_id not in self.contexts:
+            self.contexts[chat_id] = {
+                "active_symbol": None,
+                "current_menu": "MAIN",
+                "last_message_id": None,
+                "config_data": None
+            }
+        return self.contexts[chat_id]
+    
+    def update_context(self, chat_id: int, **kwargs) -> None:
+        """Обновить поля контекста пользователя."""
+        ctx = self.get_context(chat_id)
+        ctx.update(kwargs)
+    
+    def clear_context(self, chat_id: int) -> None:
+        """Очистить контекст пользователя."""
+        if chat_id in self.contexts:
+            del self.contexts[chat_id]
+
+# Глобальный экземпляр менеджера контекстов
+user_context_manager = UserContextManager()
+
 # --- SECURITY MIDDLEWARE ---
 class AccessMiddleware(BaseMiddleware):
     async def __call__(
@@ -134,12 +165,18 @@ async def cmd_start(message: types.Message, user_context: dict):
 
 @dp.message(F.text == "🟢 Status")
 async def msg_status(message: types.Message, user_context: dict):
+    chat_id = message.chat_id
+    
+    # Пример использования контекста для хранения активного символа
+    user_ctx = user_context_manager.get_context(chat_id)
+    active_symbol = user_ctx.get("active_symbol", "BTC/USDT")
+    
     c, data = await get_container_data(user_context["container"])
     if c and data:
         state = data['State']['Status']
         status_emoji = "🟢" if state == 'running' else "🔴"
         img_tag = data['Config']['Image']
-        text = f"Target: {user_context['container']}\nStatus: {status_emoji} {state}\nImage: {img_tag}"
+        text = f"Target: {user_context['container']}\nSymbol: {active_symbol}\nStatus: {status_emoji} {state}\nImage: {img_tag}"
         await message.answer(text)
     else:
         await message.answer(f"❌ Container {user_context['container']} not found!")
@@ -149,44 +186,51 @@ async def msg_logs(message: types.Message, user_context: dict):
     c, data = await get_container_data(user_context["container"])
     if c:
         try:
-            status_msg = await message.answer("⏳ Fetching logs...")
+            status_msg = await message.answer("⏳ Fetching logs...", reply_markup=main_menu())
             logs_list = await c.log(stdout=True, stderr=True, tail=50)
             logs = "".join(logs_list) if isinstance(logs_list, list) else str(logs_list)
             
             if len(logs) > 4000: logs = logs[-4000:]
             if not logs: logs = "Logs are empty."
             
-            await status_msg.edit_text(f"<pre>{logs}</pre>", parse_mode="HTML")
+            # ВАЖНО: reply_markup сохраняет меню при редактировании
+            await status_msg.edit_text(
+                f"<pre>{logs}</pre>",
+                parse_mode="HTML",
+                reply_markup=main_menu()
+            )
         except Exception as e:
-            await message.answer(f"Error: {e}")
+            await message.answer(f"Error: {e}", reply_markup=main_menu())
     else:
-        await message.answer("Container not found")
+        await message.answer("Container not found", reply_markup=main_menu())
 
 @dp.message(F.text == "🔄 Restart")
 async def msg_restart(message: types.Message, user_context: dict):
     c, _ = await get_container_data(user_context["container"])
     if c:
-        msg = await message.answer("🔄 Restarting...")
+        msg = await message.answer("🔄 Restarting...", reply_markup=main_menu())
         try:
             await c.restart()
-            await msg.edit_text("✅ Bot restarted!")
+            # ВАЖНО: reply_markup сохраняет меню при редактировании
+            await msg.edit_text("✅ Bot restarted!", reply_markup=main_menu())
         except Exception as e:
-            await msg.edit_text(f"❌ Error: {e}")
+            await msg.edit_text(f"❌ Error: {e}", reply_markup=main_menu())
     else:
-        await message.answer("Container not found")
+        await message.answer("Container not found", reply_markup=main_menu())
 
 @dp.message(F.text == "🛑 Stop")
 async def msg_stop(message: types.Message, user_context: dict):
     c, _ = await get_container_data(user_context["container"])
     if c:
-        msg = await message.answer("🛑 Stopping...")
+        msg = await message.answer("🛑 Stopping...", reply_markup=main_menu())
         try:
             await c.stop()
-            await msg.edit_text("✅ Bot stopped.")
+            # ВАЖНО: reply_markup сохраняет меню при редактировании
+            await msg.edit_text("✅ Bot stopped.", reply_markup=main_menu())
         except Exception as e:
-            await msg.edit_text(f"❌ Error: {e}")
+            await msg.edit_text(f"❌ Error: {e}", reply_markup=main_menu())
     else:
-        await message.answer("Container not found")
+        await message.answer("Container not found", reply_markup=main_menu())
 
 @dp.message(F.text == "▶️ Start")
 async def msg_start(message: types.Message, user_context: dict):
@@ -194,20 +238,28 @@ async def msg_start(message: types.Message, user_context: dict):
     if c:
         try:
             await c.start()
-            await message.answer("✅ Bot started.")
+            await message.answer("✅ Bot started.", reply_markup=main_menu())
         except Exception as e:
-            await message.answer(f"❌ Error: {e}")
+            await message.answer(f"❌ Error: {e}", reply_markup=main_menu())
     else:
-        await message.answer("Container not found")
+        await message.answer("Container not found", reply_markup=main_menu())
 
 # --- CONFIGURATION (HYBRID: Text Trigger -> Inline Menu) ---
 
 @dp.message(F.text == "⚙️ Config")
 async def msg_config(message: types.Message, user_context: dict):
+    chat_id = message.chat_id
     data = load_user_config(user_context["config_file"])
     if "error" in data:
         await message.answer(f"Config Error: {data['error']}")
         return
+    
+    # Обновляем контекст пользователя
+    user_context_manager.update_context(chat_id, 
+        current_menu="CONFIG",
+        config_data=data
+    )
+    
     await message.answer(
         f"🔧 <b>Configuration</b>\nFile: {user_context['config_file']}", 
         reply_markup=config_inline_kb(data),
@@ -216,7 +268,16 @@ async def msg_config(message: types.Message, user_context: dict):
 
 @dp.callback_query(F.data.startswith("edit_"))
 async def cb_edit_value(callback: types.CallbackQuery, state: FSMContext):
+    chat_id = callback.message.chat_id
     key = callback.data.split("edit_")[1]
+    
+    # Сохраняем текущее меню и редактируемый ключ в контекст пользователя
+    user_ctx = user_context_manager.get_context(chat_id)
+    user_context_manager.update_context(chat_id, 
+        current_menu="EDIT_VALUE",
+        last_message_id=callback.message.message_id
+    )
+    
     await state.update_data(key_to_edit=key)
     await state.set_state(EditState.waiting_for_value)
     # Используем ForceReply, чтобы пользователю было удобно вводить значение
@@ -225,16 +286,37 @@ async def cb_edit_value(callback: types.CallbackQuery, state: FSMContext):
         parse_mode="HTML",
         reply_markup=types.ForceReply(selective=True)
     )
-    await callback.answer()
+    await callback.answer()  # Обязательное подтверждение callback
 
 @dp.callback_query(F.data == "close_config")
 async def cb_close_config(callback: types.CallbackQuery):
+    chat_id = callback.message.chat_id
+    
+    # Сбрасываем меню в главное при закрытии конфига
+    user_context_manager.update_context(chat_id, current_menu="MAIN")
+    
     with suppress(TelegramBadRequest):
         await callback.message.delete()
-    await callback.answer()
+    await callback.answer()  # Обязательное подтверждение callback
+
+
+@dp.callback_query(F.data == "back_to_menu")
+async def cb_back_to_menu(callback: types.CallbackQuery):
+    """Восстановление меню после уведомлений о сделках."""
+    chat_id = callback.message.chat_id
+
+    user_context_manager.update_context(chat_id, current_menu="MAIN")
+
+    await callback.message.answer(
+        "🔙 <b>Возвращаю в меню</b>",
+        reply_markup=main_menu(),
+        parse_mode="HTML"
+    )
+    await callback.answer()  # Обязательное подтверждение callback
 
 @dp.message(EditState.waiting_for_value)
 async def process_new_value(message: types.Message, state: FSMContext, user_context: dict):
+    chat_id = message.chat_id
     user_val = message.text
     data = await state.get_data()
     key = data['key_to_edit']
@@ -250,16 +332,18 @@ async def process_new_value(message: types.Message, state: FSMContext, user_cont
         config[key] = val
         save_user_config(user_context["config_file"], config)
         
-        # [FIX] ВОССТАНАВЛИВАЕМ МЕНЮ ЗДЕСЬ
+        # Сбрасываем состояние меню в MAIN
+        user_context_manager.update_context(chat_id, current_menu="MAIN")
+        
         await message.answer(
             f"✅ Saved: {key} = {val}\n⚠️ <b>Restart bot to apply!</b>", 
             parse_mode="HTML",
-            reply_markup=main_menu()  # <--- КРИТИЧЕСКИ ВАЖНОЕ ИЗМЕНЕНИЕ
+            reply_markup=main_menu()
         )
     except ValueError:
         await message.answer(
             "❌ Invalid number format.",
-            reply_markup=main_menu() # Здесь тоже стоит вернуть меню, если мы выходим из состояния
+            reply_markup=main_menu()
         )
 
     await state.clear()
