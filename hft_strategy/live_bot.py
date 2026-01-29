@@ -1,6 +1,8 @@
 # hft_strategy/live_bot.py
 
 # --- RUNTIME OPTIMIZATIONS (HFT CRITICAL) ---
+import asyncio  # <--- СНАЧАЛА импортируем asyncio
+
 # 1. uvloop: Ускорение Event Loop в 2-4x (libuv wrapper, как в Node.js)
 try:
     import uvloop
@@ -11,8 +13,6 @@ except ImportError:
 
 # 2. gc: Управление сборщиком мусора для предотвращения stop-the-world пауз
 import gc
-
-import asyncio
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import signal

@@ -854,3 +854,61 @@ hft_strategy/
 ├── live_bot.py             (Entry: Dynamic Init)
 ├── config.py
 └── ...
+
+# 🔥 HFT Robot Project Context (Restore Point)
+**Date:** 28.01.2026
+**Role:** Lead Quantitative Developer (Code Critic Persona)
+**Status:** Phase 4.4 Completed (Zombie Mode Fix & HFT Principles Applied)
+
+## 🎯 Цель проекта
+Создание самообучающегося HFT-робота для скальпинга "от плотностей" (Wall Bounce) на Bybit (Master Trader Copytrading).
+**Текущий фокус:** Устранение "Зомби-режима" (ложные срабатывания) и следование HFT-принципу "Data First".
+
+---
+
+## 🏗 Текущая Архитектура (Refactored & Safe)
+Внедрены ключевые принципы HFT-торговли для повышения надежности системы:
+
+1.  **Data First:**
+    -   `LocalOrderBook` обновляется **всегда**, даже если стратегия занята расчетами.
+    -   Когда бот освобождается, он видит актуальные цены, а не "старье" из прошлого тика.
+
+2.  **Tick-Level Reaction:**
+    -   Добавлена проверка "Пробоя стены" в `on_tick`.
+    -   Если проходит сделка (Trade) по цене стены, бот отменяет ордер мгновенно, не дожидаясь обновления стакана (которое отстает на 50-200мс).
+
+3.  **Isolated Load:**
+    -   Тяжелая логика (`_process_*`) выполняется под замком `asyncio.Lock`.
+    -   Поступление маркет-данных не блокируется вычислениями.
+
+---
+
+## ✅ Что сделано (Completed Tasks)
+
+### 1. TradeManager Fix (Critical)
+* **Problem:** Блок `except` в `cancel_entry` содержал "фантазию" — пытался угадать исполнение ордера через `self.state = StrategyState.IN_POSITION` и `self.ctx.filled_qty = self.ctx.quantity`.
+* **HFT Principle:** "Верим только Execution Stream. Если ордер реально исполнился, вебсокет пришлет ExecutionReport через 5-10 мс."
+* **Solution:** Убрана "Speculative fill" логика.
+* **Fix:** При ошибке "Order not exists" (`110001`) — просто `self.reset()`. Если ордер реально исполнился — `handle_execution` сам переведет в `IN_POSITION`.
+
+### 2. Strategy Refactoring (AdaptiveLiveStrategy)
+* **Data First:** `self.lob.apply_snapshot/update` теперь вызывается **до** проверки `lock`. Данные всегда свежие.
+* **Load Shedding:** Тяжелая логика (`_process_idle`, `_process_order_placed`, `_process_in_position`) — только если `lock` свободен.
+* **Tick Break Detection:** `on_tick` проверяет пробой стены тиком (Buy: tick.price <= wall_price, Sell: tick.price >= wall_price) и делает fire-and-forget cancel.
+* **Priority:** `on_execution` — высший приоритет (мгновенная реакция без блокировок).
+
+### 3. Verification
+* **Execution Flow:** Проверено в `live_bot.py`, что `_dispatch_execution` корректно вызывает `on_execution` при получении `ExecutionReport` от C++ `ExchangeStreamer`.
+
+---
+
+## 📂 Структура файлов (Изменения)
+```text
+hft_strategy/
+├── services/
+│   └── trade_manager.py    (FIX: Removed speculative fill logic)
+├── strategies/
+│   └── adaptive_live_strategy.py (REFACTORED: Data First, Tick Break, Load Shedding)
+├── infrastructure/
+│   └── execution.py        (Verified: on_execution called correctly)
+└── live_bot.py             (Verified: _dispatch_execution routing)

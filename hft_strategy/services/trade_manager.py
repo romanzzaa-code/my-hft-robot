@@ -180,17 +180,13 @@ class TradeManager:
         
         try:
             await self.exec.cancel_order(self.cfg.symbol, self.ctx.order_id)
-            if self.ctx.filled_qty <= 1e-9:
-                self.reset()
-            else:
-                self.state = StrategyState.IN_POSITION
         except Exception as e:
             err_str = str(e)
+            # Если ордера нет - считаем, что мы вышли в кэш.
+            # Если он РЕАЛЬНО исполнился, ExecutionStream сам переведет нас в IN_POSITION.
             if "110001" in err_str or "Order not exists" in err_str:
-                logger.warning(f"🏎️ RACE CONDITION! Speculative fill for {self.cfg.symbol}")
-                self.state = StrategyState.IN_POSITION
-                if self.ctx.filled_qty <= 1e-9:
-                    self.ctx.filled_qty = self.ctx.quantity
+                logger.warning(f"⚠️ Order {self.ctx.order_id} not found. Assuming reset.")
+                self.reset()  # <--- Просто сбрасываем, не выдумываем позицию
             else:
                 logger.error(f"❌ Cancel Failed: {e}")
 
