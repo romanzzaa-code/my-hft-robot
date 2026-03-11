@@ -163,6 +163,11 @@ impl BybitRestClient {
         Ok(snapshots)
     }
 
+    pub async fn get_instruments(&self) -> Result<Vec<hft_core::bybit_types::BybitInstrumentInfo>> {
+        let res: hft_core::bybit_types::BybitInstrumentList = self.get("/v5/market/instruments-info", vec![("category", &self.category)]).await?;
+        Ok(res.list)
+    }
+
     pub async fn get_klines(&self, symbol: &str, interval: &str, limit: i32) -> Result<Vec<Ohlc>> {
         let res: BybitKlineList = self.get("/v5/market/kline", vec![
             ("category", &self.category),

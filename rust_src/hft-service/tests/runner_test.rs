@@ -30,6 +30,9 @@ impl ExecutionHandler for FlexibleMockExecutor {
     }
     async fn cancel_order(&self, _: &str, _: &str) -> Result<(), ExecutionError> { Ok(()) }
     async fn place_market_order(&self, _: &str, _: Side, _: Qty) -> Result<String, ExecutionError> { Ok("panic_id".into()) }
+    async fn query_order(&self, _: &str, _: &str) -> Result<ExecutionReport, ExecutionError> {
+        Err(ExecutionError::Other("Not implemented in mock".into()))
+    }
 }
 
 fn create_test_params() -> StrategyParameters {
@@ -50,6 +53,7 @@ fn create_test_params() -> StrategyParameters {
         panic_wall_ratio: dec!(0.3),
         price_runaway_ticks: 5,
         order_timeout_seconds: 30,
+        retry_backoff_ms: 1000,
     }
 }
 
@@ -74,8 +78,8 @@ async fn test_runner_race_condition_prevention() {
     let mut runner = Runner::new(
         strategy,
         executor,
-        Box::new(RxMarketDataStream::new(md_rx)),
-        Box::new(RxExecutionReportStream::new(er_rx)),
+        RxMarketDataStream::new(md_rx),
+        RxExecutionReportStream::new(er_rx),
         ar_rx,
         ar_tx.clone(),
         "BTCUSDT".to_string(),
@@ -138,8 +142,8 @@ async fn test_runner_full_cycle_success() {
     let mut runner = Runner::new(
         strategy,
         executor,
-        Box::new(RxMarketDataStream::new(md_rx)),
-        Box::new(RxExecutionReportStream::new(er_rx)),
+        RxMarketDataStream::new(md_rx),
+        RxExecutionReportStream::new(er_rx),
         ar_rx,
         ar_tx.clone(),
         "BTCUSDT".to_string(),

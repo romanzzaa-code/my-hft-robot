@@ -2,7 +2,7 @@ use anyhow::Result;
 use hft_core::connector::ExchangeMessage;
 use hft_domain::{AdaptiveWallStrategyLogic, StrategyAction, ExecutionHandler, ExecutionReport, StrategyState};
 use crate::{MarketDataStream, ExecutionReportStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{info, error, warn};
 use std::sync::Arc;
 use chrono::Utc;
@@ -16,22 +16,32 @@ pub enum ActionResult {
     ActionFailed { action: StrategyAction, error: String },
 }
 
-pub struct Runner {
+pub struct Runner<M, R, E> 
+where 
+    M: MarketDataStream,
+    R: ExecutionReportStream,
+    E: ExecutionHandler + ?Sized + 'static,
+{
     strategy: AdaptiveWallStrategyLogic,
-    executor: Arc<dyn ExecutionHandler>,
-    market_data: Box<dyn MarketDataStream>,
-    execution_reports: Box<dyn ExecutionReportStream>,
+    executor: Arc<E>,
+    market_data: M,
+    execution_reports: R,
     action_results_rx: mpsc::Receiver<ActionResult>,
     action_results_tx: mpsc::Sender<ActionResult>,
     symbol: String,
 }
 
-impl Runner {
+impl<M, R, E> Runner<M, R, E> 
+where 
+    M: MarketDataStream,
+    R: ExecutionReportStream,
+    E: ExecutionHandler + ?Sized + 'static,
+{
     pub fn new(
         strategy: AdaptiveWallStrategyLogic,
-        executor: Arc<dyn ExecutionHandler>,
-        market_data: Box<dyn MarketDataStream>,
-        execution_reports: Box<dyn ExecutionReportStream>,
+        executor: Arc<E>,
+        market_data: M,
+        execution_reports: R,
         action_results_rx: mpsc::Receiver<ActionResult>,
         action_results_tx: mpsc::Sender<ActionResult>,
         symbol: String,
@@ -46,33 +56,48 @@ impl Runner {
             symbol,
         }
     }
-
     pub async fn run(&mut self) -> Result<()> {
+        self.run_with_state_sync(Arc::new(RwLock::new(StrategyState::Idle))).await
+    }
+
+    pub async fn run_with_state_sync(&mut self, shared_state: Arc<RwLock<StrategyState>>) -> Result<()> {
         info!("Starting HFT Runner for {}", self.symbol);
         let symbol = self.symbol.clone();
 
         loop {
             tokio::select! {
                 Some(msg) = self.market_data.next_event() => {
+                    let start = std::time::Instant::now();
                     let action = match msg {
                         ExchangeMessage::Tick(tick) => self.strategy.on_tick(&tick),
                         ExchangeMessage::OrderBook(ob) => {
-                            let bids: Vec<_> = ob.bids.iter().map(|l| (l.price, l.volume)).collect();
-                            let asks: Vec<_> = ob.asks.iter().map(|l| (l.price, l.volume)).collect();
-                            self.strategy.on_orderbook(bids, asks, false)
+                            self.strategy.on_orderbook(&ob.bids, &ob.asks, false)
                         }
                     };
-                    
+
                     if !matches!(action, StrategyAction::None) {
+                        let latency = start.elapsed();
+                        info!("Strategy logic latency: {:?}. Decision: {:?}", latency, action);
                         self.strategy.update_state(&action);
+                        
+                        // Sync state to orchestrator
+                        let mut s = shared_state.write().await;
+                        *s = self.strategy.state;
+
                         self.handle_strategy_action(action, &symbol);
                     }
                 }
                 Some(report) = self.execution_reports.next_report() => {
                     self.handle_execution_report(report);
+                    // Sync state after report update
+                    let mut s = shared_state.write().await;
+                    *s = self.strategy.state;
                 }
                 Some(res) = self.action_results_rx.recv() => {
                     self.handle_action_result(res);
+                    // Sync state after action result
+                    let mut s = shared_state.write().await;
+                    *s = self.strategy.state;
                 }
                 else => {
                     warn!("One of the streams closed, shutting down runner");

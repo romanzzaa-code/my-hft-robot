@@ -74,7 +74,7 @@ async fn handle_command(
             let symbol = if symbol.is_empty() {
                 bot.send_message(msg.chat.id, "No symbol provided. Scanning for best target...").await?;
                 let scanner = MarketScannerService::new(rest_client.clone());
-                let results = scanner.scan(&config.strategy_params.target_coins, 1).await.unwrap_or_default();
+                let results = scanner.scan(None, 1).await.unwrap_or_default();
                 if let Some(best) = results.get(0) {
                     best.symbol.clone()
                 } else {
@@ -143,7 +143,7 @@ async fn handle_command(
                 config.category.clone(),
             ));
             let scanner = MarketScannerService::new(rest_client);
-            match scanner.scan(&config.strategy_params.target_coins, 5).await {
+            match scanner.scan(None, 5).await {
                 Ok(results) => {
                     let mut text = "🏆 Top Volatile Targets:\n".to_string();
                     for (i, m) in results.iter().enumerate() {

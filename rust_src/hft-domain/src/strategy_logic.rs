@@ -48,11 +48,12 @@ impl AdaptiveWallStrategyLogic {
             ctx: None,
             lob: LocalOrderBook::new(),
             analytics: MarketAnalytics::new(),
-            detector: WallDetector::new(3),
+            detector: WallDetector::new(2),
         }
     }
 
     pub fn on_tick(&mut self, tick: &Tick) -> StrategyAction {
+        // tracing::debug!("Tick: {} {}", tick.symbol, tick.price);
         if self.state == StrategyState::OrderPlaced {
             if let Some(ctx) = &self.ctx {
                 // Throttle retries if previous action failed (Backoff)
@@ -92,7 +93,7 @@ impl AdaptiveWallStrategyLogic {
         StrategyAction::None
     }
 
-    pub fn on_orderbook(&mut self, bids: Vec<(Price, Qty)>, asks: Vec<(Price, Qty)>, is_snapshot: bool) -> StrategyAction {
+    pub fn on_orderbook(&mut self, bids: &[crate::OrderBookLevel], asks: &[crate::OrderBookLevel], is_snapshot: bool) -> StrategyAction {
         self.lob.apply_update(bids, asks, is_snapshot);
         
         let bg_vol = self.lob.get_background_volume();
@@ -113,10 +114,13 @@ impl AdaptiveWallStrategyLogic {
             let qty = (raw_qty / self.params.lot_size).floor() * self.params.lot_size;
 
             if qty < self.params.min_qty {
+                tracing::warn!("Signal detected but QTY {} < MIN_QTY {}", qty, self.params.min_qty);
                 return StrategyAction::None;
             }
 
             let (tp, sl) = self.analytics.calculate_exits(signal.side, entry_price, signal.wall_price, &self.params);
+
+            tracing::info!("🚀 Signal MATCHED! Side: {:?}, Entry: {}, Qty: {}", signal.side, entry_price, qty);
 
             StrategyAction::OpenPosition {
                 side: signal.side,

@@ -18,12 +18,12 @@ async fn test_wall_bounce_scenario() {
     strategy.analytics.update_background_volume(dec!(1), dec!(1)); 
 
     let wall_price = dec!(50000);
-    let bids = vec![(wall_price, dec!(10))];
-    let asks = vec![(dec!(50100), dec!(1))];
+    let bids = vec![hft_domain::OrderBookLevel { price: wall_price, volume: dec!(10) }];
+    let asks = vec![hft_domain::OrderBookLevel { price: dec!(50100), volume: dec!(1) }];
     
     let mut action = StrategyAction::None;
     for _ in 0..5 {
-        action = strategy.on_orderbook(bids.clone(), asks.clone(), true);
+        action = strategy.on_orderbook(&bids, &asks, true);
         if matches!(action, StrategyAction::OpenPosition { .. }) { break; }
     }
     
@@ -37,8 +37,8 @@ async fn test_wall_bounce_scenario() {
     assert_eq!(strategy.state, StrategyState::OrderPlaced);
 
     // Wall Consumption (20%)
-    let bids_consumed = vec![(wall_price, dec!(8))];
-    let action = strategy.on_orderbook(bids_consumed, asks.clone(), true);
+    let bids_consumed = vec![hft_domain::OrderBookLevel { price: wall_price, volume: dec!(8) }];
+    let action = strategy.on_orderbook(&bids_consumed, &asks, true);
     assert!(matches!(action, StrategyAction::None));
 
     // Fill
@@ -73,12 +73,12 @@ async fn test_wall_collapse_panic_exit() {
     strategy.analytics.update_background_volume(dec!(1), dec!(1)); 
 
     let wall_price = dec!(50000);
-    let bids = vec![(wall_price, dec!(10))];
-    let asks = vec![(dec!(50100), dec!(1))];
+    let bids = vec![hft_domain::OrderBookLevel { price: wall_price, volume: dec!(10) }];
+    let asks = vec![hft_domain::OrderBookLevel { price: dec!(50100), volume: dec!(1) }];
     
     let mut final_action = StrategyAction::None;
     for _ in 0..5 {
-        final_action = strategy.on_orderbook(bids.clone(), asks.clone(), true);
+        final_action = strategy.on_orderbook(&bids, &asks, true);
         if matches!(final_action, StrategyAction::OpenPosition { .. }) { break; }
     }
     strategy.update_state(&final_action);
@@ -91,8 +91,8 @@ async fn test_wall_collapse_panic_exit() {
     strategy.state = StrategyState::InPosition;
 
     // Wall Collapsed - Объем 10 -> 0.1 BTC (ниже порога 1.5)
-    let bids_collapsed = vec![(wall_price, dec!(0.1))];
-    let action = strategy.on_orderbook(bids_collapsed, asks, true);
+    let bids_collapsed = vec![hft_domain::OrderBookLevel { price: wall_price, volume: dec!(0.1) }];
+    let action = strategy.on_orderbook(&bids_collapsed, &asks, true);
     
     match action {
         StrategyAction::PanicExit { reason, .. } => {

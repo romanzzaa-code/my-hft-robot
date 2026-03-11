@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use rust_decimal::Decimal;
-use crate::{Price, Qty, Side};
+use crate::{Price, Qty, Side, OrderBookLevel};
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalOrderBook {
@@ -16,33 +16,33 @@ impl LocalOrderBook {
         }
     }
 
-    pub fn apply_update(&mut self, bids: Vec<(Price, Qty)>, asks: Vec<(Price, Qty)>, is_snapshot: bool) {
+    pub fn apply_update(&mut self, bids: &[OrderBookLevel], asks: &[OrderBookLevel], is_snapshot: bool) {
         if is_snapshot {
             self.bids.clear();
             self.asks.clear();
         }
 
-        for (p, q) in bids {
-            if q.is_zero() {
-                self.bids.remove(&p);
+        for l in bids {
+            if l.volume.is_zero() {
+                self.bids.remove(&l.price);
             } else {
-                self.bids.insert(p, q);
+                self.bids.insert(l.price, l.volume);
             }
         }
 
-        for (p, q) in asks {
-            if q.is_zero() {
-                self.asks.remove(&p);
+        for l in asks {
+            if l.volume.is_zero() {
+                self.asks.remove(&l.price);
             } else {
-                self.asks.insert(p, q);
+                self.asks.insert(l.price, l.volume);
             }
         }
     }
 
     pub fn get_best(&self, side: Side) -> Option<Price> {
         match side {
-            Side::Buy => self.bids.keys().next_back().cloned(), // BTreeMap is ascending, so next_back is max
-            Side::Sell => self.asks.keys().next().cloned(),     // next is min
+            Side::Buy => self.bids.keys().next_back().cloned(), 
+            Side::Sell => self.asks.keys().next().cloned(),     
         }
     }
 
@@ -58,19 +58,23 @@ impl LocalOrderBook {
             return Decimal::ZERO;
         }
 
-        // Get levels 2-11 (10 levels)
-        let bid_volumes: Vec<Qty> = self.bids.values().rev().skip(1).take(10).cloned().collect();
-        let ask_volumes: Vec<Qty> = self.asks.values().skip(1).take(10).cloned().collect();
+        let mut sum = Decimal::ZERO;
+        let mut count = 0;
 
-        let mut all_vols = Vec::with_capacity(20);
-        all_vols.extend(bid_volumes);
-        all_vols.extend(ask_volumes);
+        for vol in self.bids.values().rev().skip(1).take(10) {
+            sum += *vol;
+            count += 1;
+        }
 
-        if all_vols.is_empty() {
+        for vol in self.asks.values().skip(1).take(10) {
+            sum += *vol;
+            count += 1;
+        }
+
+        if count == 0 {
             return Decimal::ZERO;
         }
 
-        let sum: Decimal = all_vols.iter().sum();
-        sum / Decimal::from(all_vols.len())
+        sum / Decimal::from(count)
     }
 }

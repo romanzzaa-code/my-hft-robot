@@ -16,7 +16,7 @@ impl BybitRunnerFactory {
         api_key: String,
         api_secret: String,
         symbol: String,
-    ) -> (Runner, Vec<tokio::task::JoinHandle<()>>) {
+    ) -> (Runner<RxMarketDataStream, RxExecutionReportStream, dyn ExecutionHandler>, Vec<tokio::task::JoinHandle<()>>) {
         let (ws_tx, ws_rx) = mpsc::channel(100);
         let (exec_tx, exec_rx) = mpsc::channel(10);
         let (action_tx, action_rx) = mpsc::channel(10);
@@ -64,8 +64,8 @@ impl BybitRunnerFactory {
         let runner = Runner::new(
             strategy,
             executor,
-            Box::new(RxMarketDataStream::new(ws_rx)),
-            Box::new(RxExecutionReportStream::new(exec_rx)),
+            RxMarketDataStream::new(ws_rx),
+            RxExecutionReportStream::new(exec_rx),
             action_rx,
             action_tx,
             symbol,

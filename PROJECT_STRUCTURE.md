@@ -27,7 +27,7 @@
 - `executors.rs`: Реализации `ExecutionHandler`. `LiveExecutor` (реальная торговля) и `ShadowExecutor` (логирование без отправки).
 - `bybit_rest.rs`: `BybitRestClient` — реализация REST запросов к Bybit V5.
 - `bybit_ws_private.rs`: `BybitPrivateWs` — WebSocket клиент для приватных данных (ордера, позиции).
-- `market_scanner.rs`: Поиск волатильных пар для запуска стратегии.
+- `market_scanner.rs`: `MarketScannerService` — **ОСНОВНОЙ КОМПОНЕНТ ДЛЯ ПОИСКА МОНЕТ.** Поиск волатильных пар для запуска стратегии через воронку (CopyTrading -> Volume -> NATR).
 - `factories.rs`: `BybitRunnerFactory` — создание инстансов `Runner` со всеми зависимостями.
 
 ### 3. `hft-core` (Shared Infrastructure)

@@ -6,6 +6,7 @@ use anyhow::Context;
 
 #[derive(Debug, Deserialize)]
 pub struct RawStrategyParams {
+    pub max_active_coins: usize,
     pub target_coins: Vec<String>,
     pub investment_usdt: Decimal,
     pub wall_ratio_threshold: Decimal,
@@ -71,11 +72,17 @@ impl AppConfig {
             p.lot_size = rust_decimal_macros::dec!(0.0001);
         } else if symbol.contains("ETH") {
             p.tick_size = rust_decimal_macros::dec!(0.01);
-            p.lot_size = rust_decimal_macros::dec!(0.001);
+            p.lot_size = rust_decimal_macros::dec!(0.01);
+        } else if symbol.contains("SOL") {
+            p.tick_size = rust_decimal_macros::dec!(0.01);
+            p.lot_size = rust_decimal_macros::dec!(0.01);
+        } else if symbol.contains("XRP") || symbol.contains("ADA") || symbol.contains("DOGE") {
+            p.tick_size = rust_decimal_macros::dec!(0.0001);
+            p.lot_size = rust_decimal_macros::dec!(1.0);
         } else {
             // Default generic small coin
             p.tick_size = rust_decimal_macros::dec!(0.0001);
-            p.lot_size = rust_decimal_macros::dec!(1.0);
+            p.lot_size = rust_decimal_macros::dec!(0.1);
         }
         
         p

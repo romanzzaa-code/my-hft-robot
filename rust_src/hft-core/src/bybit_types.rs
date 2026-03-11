@@ -96,6 +96,19 @@ pub struct BybitTickerList {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct BybitInstrumentInfo {
+    pub symbol: String,
+    pub status: String,
+    #[serde(rename = "copyTrading")]
+    pub copy_trading: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BybitInstrumentList {
+    pub list: Vec<BybitInstrumentInfo>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct BybitKlineList {
     pub list: Vec<Vec<String>>, // [timestamp, open, high, low, close, volume, turnover]
 }

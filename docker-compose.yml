@@ -19,6 +19,7 @@ services:
       - TG_COMMANDER_TOKEN=${TG_COMMANDER_TOKEN}
       - BYBIT_IS_SHADOW=${BYBIT_IS_SHADOW:-true}
       - BYBIT_IS_TESTNET=${BYBIT_IS_TESTNET:-false}
+      - BYBIT_CATEGORY=${BYBIT_CATEGORY:-linear}
     logging:
       driver: "json-file"
       options:
