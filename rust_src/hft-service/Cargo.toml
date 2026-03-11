@@ -23,6 +23,7 @@ async-trait = "0.1"
 simd-json = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 mockito = { workspace = true }

@@ -17,13 +17,20 @@ pub struct StrategyParameters {
     pub exit_wall_tolerance_ticks: i32, // Сколько тиков пробоя стены допускаем перед паникой
     pub stop_loss_ticks: i32,
     pub take_profit_ticks: i32,
+    pub cancel_wall_ratio: Decimal, // Ratio of wall left before cancelling order (e.g. 0.4)
+    pub panic_wall_ratio: Decimal,  // Ratio of wall left before panic exit (e.g. 0.3)
+    pub price_runaway_ticks: i32,   // How far price can move from entry before cancel
+    pub order_timeout_seconds: i64, // How long to wait for fill
+    pub retry_backoff_ms: i64,      // Cooldown after failed action (ms)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StrategyState {
     Idle,
     OrderPlaced,
+    Cancelling,    // Transit state: waiting for cancel confirmation
     InPosition,
+    PanicExiting, // Transit state: waiting for panic exit order placement
     Error,
 }
 
@@ -36,6 +43,8 @@ pub struct TradeContext {
     pub stop_loss: Price,
     pub take_profit: Price,
     pub placed_at: DateTime<Utc>,
+    pub last_action_at: Option<DateTime<Utc>>, // For backoff/throttling retries
+    pub last_queried_at: Option<DateTime<Utc>>,
     pub order_id: Option<String>,
     pub filled_qty: Qty,
     pub avg_fill_price: Option<Price>,
@@ -57,6 +66,11 @@ impl StrategyParameters {
             exit_wall_tolerance_ticks: 2,
             stop_loss_ticks: 50,
             take_profit_ticks: 100,
+            cancel_wall_ratio: dec!(0.4),
+            panic_wall_ratio: dec!(0.3),
+            price_runaway_ticks: 5,
+            order_timeout_seconds: 30,
+            retry_backoff_ms: 1000,
         }
     }
 }

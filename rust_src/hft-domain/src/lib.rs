@@ -12,11 +12,28 @@ pub use strategy_logic::{AdaptiveWallStrategyLogic, StrategyAction};
 use serde::{Deserialize, Serialize};
 use rust_decimal::Decimal;
 use chrono::{DateTime, Utc};
+use strum_macros::Display;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
 pub enum Side {
+    #[serde(rename = "Buy")]
     Buy,
+    #[serde(rename = "Sell")]
     Sell,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExecutionError {
+    #[error("Insufficient funds")]
+    InsufficientFunds,
+    #[error("Rate limited")]
+    RateLimited,
+    #[error("Order rejected: {0}")]
+    OrderRejected(String),
+    #[error("Network error: {0}")]
+    NetworkError(String),
+    #[error("Other error: {0}")]
+    Other(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,10 +80,11 @@ pub trait ExecutionHandler: Send + Sync {
         qty: Qty,
         stop_loss: Option<Price>,
         take_profit: Option<Price>,
-    ) -> anyhow::Result<String>;
+    ) -> Result<String, ExecutionError>;
 
-    async fn cancel_order(&self, symbol: &str, order_id: &str) -> anyhow::Result<()>;
-    async fn place_market_order(&self, symbol: &str, side: Side, qty: Qty) -> anyhow::Result<String>;
+    async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<(), ExecutionError>;
+    async fn place_market_order(&self, symbol: &str, side: Side, qty: Qty) -> Result<String, ExecutionError>;
+    async fn query_order(&self, symbol: &str, order_id: &str) -> Result<ExecutionReport, ExecutionError>;
 }
 
 pub type Price = Decimal;

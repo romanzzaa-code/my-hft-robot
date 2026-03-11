@@ -1,19 +1,28 @@
 use anyhow::Result;
-use hft_core::connector::{WsConnector, BybitParser, ExchangeMessage};
-use hft_domain::{AdaptiveWallStrategyLogic, StrategyAction, Side, ExecutionHandler};
-use crate::BybitPrivateWs;
+use hft_core::connector::ExchangeMessage;
+use hft_domain::{AdaptiveWallStrategyLogic, StrategyAction, ExecutionHandler, ExecutionReport, StrategyState};
+use crate::{MarketDataStream, ExecutionReportStream};
 use tokio::sync::mpsc;
 use tracing::{info, error, warn};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use chrono::Utc;
+
+/// Результат асинхронного действия экзекутора
+pub enum ActionResult {
+    EntryOrderPlaced { order_id: String },
+    PanicExitPlaced { order_id: String },
+    OrderCancelled { order_id: String },
+    OrderReportFetched { report: ExecutionReport },
+    ActionFailed { action: StrategyAction, error: String },
+}
 
 pub struct Runner {
-    strategy: Arc<Mutex<AdaptiveWallStrategyLogic>>,
+    strategy: AdaptiveWallStrategyLogic,
     executor: Arc<dyn ExecutionHandler>,
-    public_ws_url: String,
-    private_ws_url: String,
-    api_key: String,
-    api_secret: String,
+    market_data: Box<dyn MarketDataStream>,
+    execution_reports: Box<dyn ExecutionReportStream>,
+    action_results_rx: mpsc::Receiver<ActionResult>,
+    action_results_tx: mpsc::Sender<ActionResult>,
     symbol: String,
 }
 
@@ -21,139 +30,207 @@ impl Runner {
     pub fn new(
         strategy: AdaptiveWallStrategyLogic,
         executor: Arc<dyn ExecutionHandler>,
-        public_ws_url: String,
-        private_ws_url: String,
-        api_key: String,
-        api_secret: String,
+        market_data: Box<dyn MarketDataStream>,
+        execution_reports: Box<dyn ExecutionReportStream>,
+        action_results_rx: mpsc::Receiver<ActionResult>,
+        action_results_tx: mpsc::Sender<ActionResult>,
         symbol: String,
     ) -> Self {
         Self {
-            strategy: Arc::new(Mutex::new(strategy)),
+            strategy,
             executor,
-            public_ws_url,
-            private_ws_url,
-            api_key,
-            api_secret,
+            market_data,
+            execution_reports,
+            action_results_rx,
+            action_results_tx,
             symbol,
         }
     }
 
-    pub async fn run(&self) -> Result<()> {
-        let (ws_tx, mut ws_rx) = mpsc::channel(100);
-        let (exec_tx, mut exec_rx) = mpsc::channel(10);
-
-        let connector = WsConnector::new(
-            self.public_ws_url.clone(),
-            ws_tx,
-            Box::new(BybitParser),
-        );
-
-        let private_ws = BybitPrivateWs::new(
-            self.private_ws_url.clone(),
-            self.api_key.clone(),
-            self.api_secret.clone(),
-            exec_tx,
-        );
-
+    pub async fn run(&mut self) -> Result<()> {
+        info!("Starting HFT Runner for {}", self.symbol);
         let symbol = self.symbol.clone();
-        let subscriptions = vec![
-            format!("publicTrade.{}", symbol),
-            format!("orderbook.50.{}", symbol),
-        ];
 
-        let strategy = self.strategy.clone();
-        let executor = self.executor.clone();
-
-        info!("Starting HFT Runner for {}", symbol);
-
-        tokio::select! {
-            res = connector.run(subscriptions) => {
-                error!("Public WS stopped: {:?}", res);
-            }
-            res = private_ws.run() => {
-                error!("Private WS stopped: {:?}", res);
-            }
-            _ = async {
-                while let Some(msg) = ws_rx.recv().await {
-                    let mut strat = strategy.lock().await;
+        loop {
+            tokio::select! {
+                Some(msg) = self.market_data.next_event() => {
                     let action = match msg {
-                        ExchangeMessage::Tick(tick) => strat.on_tick(&tick),
+                        ExchangeMessage::Tick(tick) => self.strategy.on_tick(&tick),
                         ExchangeMessage::OrderBook(ob) => {
                             let bids: Vec<_> = ob.bids.iter().map(|l| (l.price, l.volume)).collect();
                             let asks: Vec<_> = ob.asks.iter().map(|l| (l.price, l.volume)).collect();
-                            strat.on_orderbook(bids, asks, false)
+                            self.strategy.on_orderbook(bids, asks, false)
                         }
                     };
-                    self.handle_action(&mut strat, action, &executor, &symbol).await;
-                }
-            } => {}
-            _ = async {
-                while let Some(report) = exec_rx.recv().await {
-                    let mut strat = strategy.lock().await;
-                    info!("Execution Report: {:?}", report);
-                    if let Some(ctx) = &mut strat.ctx {
-                        if ctx.order_id == Some(report.order_id.clone()) {
-                            ctx.filled_qty = report.exec_qty;
-                            if report.is_fully_filled {
-                                info!("Order FULLY FILLED: {}", report.order_id);
-                                strat.state = hft_domain::StrategyState::InPosition;
-                            }
-                        }
+                    
+                    if !matches!(action, StrategyAction::None) {
+                        self.strategy.update_state(&action);
+                        self.handle_strategy_action(action, &symbol);
                     }
                 }
-            } => {}
+                Some(report) = self.execution_reports.next_report() => {
+                    self.handle_execution_report(report);
+                }
+                Some(res) = self.action_results_rx.recv() => {
+                    self.handle_action_result(res);
+                }
+                else => {
+                    warn!("One of the streams closed, shutting down runner");
+                    break;
+                }
+            }
         }
-
         Ok(())
     }
 
-    async fn handle_action(
-        &self,
-        strat: &mut AdaptiveWallStrategyLogic,
-        action: StrategyAction,
-        executor: &Arc<dyn ExecutionHandler>,
-        symbol: &str,
-    ) {
-        match action {
-            StrategyAction::OpenPosition { side, entry_price, qty, stop_loss, take_profit, .. } => {
-                info!("OPEN POSITION: {:?} @ {} Qty={}", side, entry_price, qty);
-                match executor.place_limit_order(symbol, side, entry_price, qty, Some(stop_loss), Some(take_profit)).await {
-                    Ok(order_id) => {
-                        info!("Order placed: {}", order_id);
-                        strat.update_state(&action);
-                        if let Some(ctx) = &mut strat.ctx {
-                            ctx.order_id = Some(order_id);
+    fn handle_strategy_action(&self, action: StrategyAction, symbol: &str) {
+        let executor = self.executor.clone();
+        let tx = self.action_results_tx.clone();
+        let symbol = symbol.to_string();
+        let action_for_err = action.clone();
+
+        tokio::spawn(async move {
+            match action {
+                StrategyAction::OpenPosition { side, entry_price, qty, stop_loss, take_profit, .. } => {
+                    match executor.place_limit_order(&symbol, side, entry_price, qty, Some(stop_loss), Some(take_profit)).await {
+                        Ok(order_id) => {
+                            let _ = tx.send(ActionResult::EntryOrderPlaced { order_id }).await;
+                        }
+                        Err(e) => {
+                            let _ = tx.send(ActionResult::ActionFailed { action: action_for_err, error: e.to_string() }).await;
                         }
                     }
-                    Err(e) => error!("Failed to place order: {}", e),
                 }
-            }
-            StrategyAction::CancelEntry { order_id, reason } => {
-                info!("CANCEL ENTRY: {} (Reason: {})", order_id, reason);
-                match executor.cancel_order(symbol, &order_id).await {
-                    Ok(_) => {
-                        info!("Order cancelled: {}", order_id);
-                        strat.reset();
+                StrategyAction::CancelEntry { ref order_id, .. } => {
+                    match executor.cancel_order(&symbol, order_id).await {
+                        Ok(_) => {
+                            let _ = tx.send(ActionResult::OrderCancelled { order_id: order_id.clone() }).await;
+                        }
+                        Err(e) => {
+                            let _ = tx.send(ActionResult::ActionFailed { action: action_for_err, error: e.to_string() }).await;
+                        }
                     }
-                    Err(e) => error!("Failed to cancel order: {}", e),
                 }
-            }
-            StrategyAction::PanicExit { qty, reason, .. } => {
-                warn!("PANIC EXIT: Qty={} (Reason: {})", qty, reason);
-                let side = if let Some(ctx) = &strat.ctx {
-                    if ctx.side == Side::Buy { Side::Sell } else { Side::Buy }
-                } else {
-                    return;
-                };
-                match executor.place_market_order(symbol, side, qty).await {
-                    Ok(order_id) => {
-                        info!("Panic Market Order placed: {}", order_id);
-                        strat.reset();
+                StrategyAction::PanicExit { side, qty, order_id: _, .. } => {
+                    match executor.place_market_order(&symbol, side, qty).await {
+                        Ok(new_order_id) => {
+                            let _ = tx.send(ActionResult::PanicExitPlaced { order_id: new_order_id }).await;
+                        }
+                        Err(e) => {
+                            let _ = tx.send(ActionResult::ActionFailed { action: action_for_err, error: e.to_string() }).await;
+                        }
                     }
-                    Err(e) => error!("Failed to place panic market order: {}", e),
+                }
+                StrategyAction::RequestStatusUpdate { ref order_id } => {
+                    match executor.query_order(&symbol, order_id).await {
+                        Ok(report) => {
+                            let _ = tx.send(ActionResult::OrderReportFetched { report }).await;
+                        }
+                        Err(e) => {
+                            let _ = tx.send(ActionResult::ActionFailed { action: action_for_err, error: e.to_string() }).await;
+                        }
+                    }
+                }
+                StrategyAction::None => {}
+            }
+        });
+    }
+
+    fn handle_action_result(&mut self, res: ActionResult) {
+        match res {
+            ActionResult::EntryOrderPlaced { order_id } => {
+                info!("Entry order successfully PLACED: {}", order_id);
+                if let Some(ctx) = &mut self.strategy.ctx {
+                    ctx.order_id = Some(order_id);
+                    ctx.last_action_at = None; // Reset on success
                 }
             }
-            StrategyAction::None => {}
+            ActionResult::PanicExitPlaced { order_id } => {
+                let entry_p = self.strategy.ctx.as_ref().map(|c| c.entry_price).unwrap_or_default();
+                warn!("🔥 PANIC EXIT order placed: {}. Entry was: {}", order_id, entry_p);
+                self.strategy.reset(); 
+            }
+            ActionResult::OrderCancelled { order_id } => {
+                info!("Order successfully CANCELLED: {}", order_id);
+                self.strategy.reset();
+            }
+            ActionResult::OrderReportFetched { report } => {
+                info!("Fetched order status for {}: filled={}", report.order_id, report.is_fully_filled);
+                self.handle_execution_report(report);
+            }
+            ActionResult::ActionFailed { action, error } => {
+                match action {
+                    StrategyAction::OpenPosition { .. } => {
+                        error!("OpenPosition FAILED: {}. Rolling back to Idle.", error);
+                        self.strategy.reset();
+                    }
+                    StrategyAction::CancelEntry { order_id, .. } => {
+                        error!("CancelEntry FAILED for order {}: {}. Retrying with backoff.", order_id, error);
+                        if let Some(ctx) = &mut self.strategy.ctx {
+                            ctx.last_action_at = Some(Utc::now());
+                        }
+                        self.strategy.state = StrategyState::OrderPlaced; // Fallback to operational state
+                    }
+                    StrategyAction::PanicExit { side, qty, reason, .. } => {
+                        error!("PanicExit FAILED ({} {}): {}. Reason: {}. Retrying with backoff.", side, qty, error, reason);
+                        if let Some(ctx) = &mut self.strategy.ctx {
+                            ctx.last_action_at = Some(Utc::now());
+                        }
+                        self.strategy.state = StrategyState::InPosition; // Fallback to operational state
+                    }
+                    StrategyAction::RequestStatusUpdate { order_id } => {
+                        warn!("RequestStatusUpdate FAILED for order {}: {}", order_id, error);
+                    }
+                    StrategyAction::None => {}
+                }
+            }
         }
+    }
+
+    fn handle_execution_report(&mut self, report: ExecutionReport) {
+        info!("Execution Report: {:?}", report);
+        if let Some(ctx) = &mut self.strategy.ctx {
+            if ctx.order_id == Some(report.order_id.clone()) {
+                ctx.filled_qty = report.exec_qty;
+                if report.is_fully_filled {
+                    info!("Order FULLY FILLED: {}", report.order_id);
+                    self.strategy.state = StrategyState::InPosition;
+                }
+            }
+        }
+    }
+}
+
+pub struct RxMarketDataStream {
+    rx: mpsc::Receiver<ExchangeMessage>,
+}
+
+impl RxMarketDataStream {
+    pub fn new(rx: mpsc::Receiver<ExchangeMessage>) -> Self {
+        Self { rx }
+    }
+}
+
+#[async_trait::async_trait]
+impl MarketDataStream for RxMarketDataStream {
+    async fn next_event(&mut self) -> Option<ExchangeMessage> {
+        self.rx.recv().await
+    }
+}
+
+pub struct RxExecutionReportStream {
+    rx: mpsc::Receiver<ExecutionReport>,
+}
+
+impl RxExecutionReportStream {
+    pub fn new(rx: mpsc::Receiver<ExecutionReport>) -> Self {
+        Self { rx }
+    }
+}
+
+#[async_trait::async_trait]
+impl ExecutionReportStream for RxExecutionReportStream {
+    async fn next_report(&mut self) -> Option<ExecutionReport> {
+        self.rx.recv().await
     }
 }

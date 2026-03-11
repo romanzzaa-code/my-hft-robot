@@ -133,46 +133,61 @@ impl WsConnector {
     }
 
     pub async fn run(&self, subscriptions: Vec<String>) -> Result<()> {
-        let (ws_stream, _) = connect_async(Url::parse(&self.url)?).await?;
-        info!("Connected to {}", self.url);
-        
-        let (mut write, mut read) = ws_stream.split();
+        let mut backoff = std::time::Duration::from_secs(1);
+        loop {
+            info!("Connecting to {}...", self.url);
+            match connect_async(Url::parse(&self.url)?).await {
+                Ok((ws_stream, _)) => {
+                    info!("Connected to {}", self.url);
+                    backoff = std::time::Duration::from_secs(1);
+                    
+                    let (mut write, mut read) = ws_stream.split();
 
-        // Subscribe
-        for sub in subscriptions {
-            let sub_msg = serde_json::json!({
-                "op": "subscribe",
-                "args": [sub]
-            });
-            write.send(Message::Text(sub_msg.to_string())).await?;
-        }
-
-        while let Some(msg) = read.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    match self.parser.parse(&text) {
-                        Ok(messages) => {
-                            for m in messages {
-                                self.tx.send(m).await?;
-                            }
+                    // Subscribe
+                    for sub in &subscriptions {
+                        let sub_msg = serde_json::json!({
+                            "op": "subscribe",
+                            "args": [sub]
+                        });
+                        if let Err(e) = write.send(Message::Text(sub_msg.to_string())).await {
+                            error!("Subscription error: {}", e);
+                            break;
                         }
-                        Err(e) => error!("Error parsing message: {}", e),
+                    }
+
+                    while let Some(msg) = read.next().await {
+                        match msg {
+                            Ok(Message::Text(text)) => {
+                                match self.parser.parse(&text) {
+                                    Ok(messages) => {
+                                        for m in messages {
+                                            if let Err(e) = self.tx.send(m).await {
+                                                error!("Channel send error: {}", e);
+                                                return Ok(()); // Main loop likely dropped
+                                            }
+                                        }
+                                    }
+                                    Err(e) => error!("Error parsing message: {}", e),
+                                }
+                            }
+                            Ok(Message::Close(frame)) => {
+                                warn!("WebSocket closed: {:?}", frame);
+                                break;
+                            }
+                            Err(e) => {
+                                error!("WebSocket error: {}", e);
+                                break;
+                            }
+                            _ => {}
+                        }
                     }
                 }
-                Ok(Message::Binary(_bin)) => {}
-                Ok(Message::Ping(_)) => {}
-                Ok(Message::Pong(_)) => {}
-                Ok(Message::Frame(_)) => {}
-                Ok(Message::Close(_)) => {
-                    warn!("WebSocket closed");
-                    break;
-                }
                 Err(e) => {
-                    error!("WebSocket error: {}", e);
-                    break;
+                    error!("Connection failed: {}. Retrying in {:?}", e, backoff);
                 }
             }
+            tokio::time::sleep(backoff).await;
+            backoff = std::cmp::min(backoff * 2, std::time::Duration::from_secs(60));
         }
-        Ok(())
     }
 }

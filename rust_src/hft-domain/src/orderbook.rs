@@ -4,8 +4,8 @@ use crate::{Price, Qty, Side};
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalOrderBook {
-    pub bids: BTreeMap<Price, Qty>, // Sorted descending (highest first) handled by logic
-    pub asks: BTreeMap<Price, Qty>, // Sorted ascending (lowest first) handled by logic
+    bids: BTreeMap<Price, Qty>, 
+    asks: BTreeMap<Price, Qty>, 
 }
 
 impl LocalOrderBook {

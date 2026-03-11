@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(LiveExecutor::new((*rest_client).clone()))
     };
 
-    let runner = Runner::new(
+    let (mut runner, _handles) = hft_service::BybitRunnerFactory::create(
         strategy,
         executor,
         config.public_ws_url.clone(),

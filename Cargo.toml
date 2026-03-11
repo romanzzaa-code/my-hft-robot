@@ -27,6 +27,8 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 uuid = { version = "1.7", features = ["v4"] }
+strum = "0.26"
+strum_macros = "0.26"
 dotenvy = "0.15"
 clap = { version = "4.4", features = ["derive"] }
 teloxide = { version = "0.12", features = ["macros"] }

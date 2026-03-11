@@ -1,5 +1,5 @@
-use hft_domain::{ExecutionHandler, Price, Qty, Side, TickerSnapshot, Ohlc};
-use hft_core::bybit_types::{CreateOrderRequest, CancelOrderRequest, BybitResponse, CreateOrderResult, BybitTickerList, BybitKlineList};
+use hft_domain::{ExecutionHandler, Price, Qty, Side, TickerSnapshot, Ohlc, ExecutionError, ExecutionReport};
+use hft_core::bybit_types::{CreateOrderRequest, CancelOrderRequest, BybitResponse, CreateOrderResult, BybitTickerList, BybitKlineList, BybitOrderQueryList};
 use anyhow::Result;
 use reqwest::Client;
 use hmac::{Hmac, Mac};
@@ -51,16 +51,17 @@ impl BybitRestClient {
         hex::encode(mac.finalize().into_bytes())
     }
 
-    async fn post<T: serde::Serialize, R: serde::de::DeserializeOwned>(&self, path: &str, body: &T) -> Result<R> {
+    async fn post<T: serde::Serialize, R: serde::de::DeserializeOwned>(&self, path: &str, body: &T) -> Result<R, ExecutionError> {
         let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| ExecutionError::Other(e.to_string()))?
             .as_millis()
             .to_string();
-        let payload = serde_json::to_string(body)?;
+        let payload = serde_json::to_string(body).map_err(|e| ExecutionError::Other(e.to_string()))?;
         let signature = self.generate_signature(&timestamp, &payload);
 
         let url = format!("{}{}", self.base_url, path);
-        let response = self.client.post(&url)
+        let res = self.client.post(&url)
             .header("X-BAPI-API-KEY", &self.api_key)
             .header("X-BAPI-TIMESTAMP", &timestamp)
             .header("X-BAPI-SIGN", &signature)
@@ -68,14 +69,21 @@ impl BybitRestClient {
             .header("Content-Type", "application/json")
             .body(payload)
             .send()
-            .await?
-            .json::<BybitResponse<R>>()
-            .await?;
+            .await
+            .map_err(|e| ExecutionError::NetworkError(e.to_string()))?;
+
+        let response = res.json::<BybitResponse<R>>()
+            .await
+            .map_err(|e| ExecutionError::Other(e.to_string()))?;
 
         if response.ret_code != 0 {
-            anyhow::bail!("Bybit API error {}: {}", response.ret_code, response.ret_msg);
+            return Err(match response.ret_code {
+                10001 | 10002 => ExecutionError::RateLimited,
+                110001 | 110003 | 110004 | 110007 => ExecutionError::InsufficientFunds,
+                _ => ExecutionError::OrderRejected(response.ret_msg),
+            });
         }
-        response.result.ok_or_else(|| anyhow::anyhow!("Bybit API success but no result"))
+        response.result.ok_or_else(|| ExecutionError::Other("Bybit API success but no result".to_string()))
     }
 
     async fn get<R: serde::de::DeserializeOwned>(&self, path: &str, query: Vec<(&str, &str)>) -> Result<R> {
@@ -88,8 +96,6 @@ impl BybitRestClient {
             }
         }
 
-        // For public market data, we don't need signature, but Bybit allows it.
-        // Let's implement it without signature first for simplicity as it is public data.
         let response = self.client.get(&url)
             .send()
             .await?
@@ -100,6 +106,49 @@ impl BybitRestClient {
             anyhow::bail!("Bybit API error {}: {}", response.ret_code, response.ret_msg);
         }
         response.result.ok_or_else(|| anyhow::anyhow!("Bybit API success but no result"))
+    }
+
+    async fn get_private<R: serde::de::DeserializeOwned>(&self, path: &str, query: Vec<(&str, &str)>) -> Result<R, ExecutionError> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| ExecutionError::Other(e.to_string()))?
+            .as_millis()
+            .to_string();
+        
+        let mut query_string = String::new();
+        for (i, (k, v)) in query.iter().enumerate() {
+            if i > 0 { query_string.push('&'); }
+            query_string.push_str(&format!("{}={}", k, v));
+        }
+
+        let signature = self.generate_signature(&timestamp, &query_string);
+
+        let url = if query_string.is_empty() {
+            format!("{}{}", self.base_url, path)
+        } else {
+            format!("{}{}?{}", self.base_url, path, query_string)
+        };
+
+        let res = self.client.get(&url)
+            .header("X-BAPI-API-KEY", &self.api_key)
+            .header("X-BAPI-TIMESTAMP", &timestamp)
+            .header("X-BAPI-SIGN", &signature)
+            .header("X-BAPI-RECV-WINDOW", &self.recv_window)
+            .send()
+            .await
+            .map_err(|e| ExecutionError::NetworkError(e.to_string()))?;
+
+        let response = res.json::<BybitResponse<R>>()
+            .await
+            .map_err(|e| ExecutionError::Other(e.to_string()))?;
+
+        if response.ret_code != 0 {
+            return Err(match response.ret_code {
+                10001 | 10002 => ExecutionError::RateLimited,
+                _ => ExecutionError::Other(format!("Bybit API error {}: {}", response.ret_code, response.ret_msg)),
+            });
+        }
+        response.result.ok_or_else(|| ExecutionError::Other("Bybit API success but no result".to_string()))
     }
 
     pub async fn get_tickers(&self) -> Result<Vec<TickerSnapshot>> {
@@ -123,7 +172,6 @@ impl BybitRestClient {
         ]).await?;
 
         let klines = res.list.into_iter().filter_map(|k| {
-            // [timestamp, open, high, low, close, volume, turnover]
             if k.len() < 6 { return None; }
             Some(Ohlc {
                 open: Decimal::from_str(&k[1]).ok()?,
@@ -147,11 +195,11 @@ impl ExecutionHandler for BybitRestClient {
         qty: Qty,
         stop_loss: Option<Price>,
         take_profit: Option<Price>,
-    ) -> Result<String> {
+    ) -> Result<String, ExecutionError> {
         let req = CreateOrderRequest {
             category: self.category.clone(),
             symbol: symbol.to_string(),
-            side: match side { Side::Buy => "Buy".to_string(), Side::Sell => "Sell".to_string() },
+            side: side.to_string(),
             order_type: "Limit".to_string(),
             qty: qty.to_string(),
             price: Some(price.to_string()),
@@ -165,7 +213,7 @@ impl ExecutionHandler for BybitRestClient {
         Ok(result.order_id)
     }
 
-    async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()> {
+    async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<(), ExecutionError> {
         let req = CancelOrderRequest {
             category: self.category.clone(),
             symbol: symbol.to_string(),
@@ -176,11 +224,11 @@ impl ExecutionHandler for BybitRestClient {
         Ok(())
     }
 
-    async fn place_market_order(&self, symbol: &str, side: Side, qty: Qty) -> Result<String> {
+    async fn place_market_order(&self, symbol: &str, side: Side, qty: Qty) -> Result<String, ExecutionError> {
         let req = CreateOrderRequest {
             category: self.category.clone(),
             symbol: symbol.to_string(),
-            side: match side { Side::Buy => "Buy".to_string(), Side::Sell => "Sell".to_string() },
+            side: side.to_string(),
             order_type: "Market".to_string(),
             qty: qty.to_string(),
             price: None,
@@ -192,5 +240,26 @@ impl ExecutionHandler for BybitRestClient {
 
         let result: CreateOrderResult = self.post("/v5/order/create", &req).await?;
         Ok(result.order_id)
+    }
+
+    async fn query_order(&self, symbol: &str, order_id: &str) -> Result<ExecutionReport, ExecutionError> {
+        let res: BybitOrderQueryList = self.get_private("/v5/order/realtime", vec![
+            ("category", &self.category),
+            ("symbol", symbol),
+            ("orderId", order_id),
+        ]).await?;
+
+        let order = res.list.first().ok_or_else(|| ExecutionError::Other("Order not found".to_string()))?;
+        let side = if order.side == "Buy" { Side::Buy } else { Side::Sell };
+        
+        Ok(ExecutionReport {
+            order_id: order.order_id.clone(),
+            symbol: order.symbol.clone(),
+            side,
+            exec_price: Decimal::from_str(&order.avg_price).unwrap_or_default(),
+            exec_qty: Decimal::from_str(&order.cum_exec_qty).unwrap_or_default(),
+            remaining_qty: Decimal::from_str(&order.qty).unwrap_or_default() - Decimal::from_str(&order.cum_exec_qty).unwrap_or_default(),
+            is_fully_filled: order.order_status == "Filled",
+        })
     }
 }

@@ -18,7 +18,6 @@ pub struct AppConfig {
     pub api_secret: String,
     pub public_ws_url: String,
     pub private_ws_url: String,
-    pub rest_url: String,
     pub is_testnet: bool,
     pub is_shadow: bool,
     pub category: String,
@@ -41,8 +40,6 @@ impl AppConfig {
             .unwrap_or_else(|_| if is_testnet { "wss://stream-testnet.bybit.com/v5/public/linear".to_string() } else { "wss://stream.bybit.com/v5/public/linear".to_string() });
         let private_ws_url = std::env::var("BYBIT_PRIVATE_WS_URL")
             .unwrap_or_else(|_| if is_testnet { "wss://stream-testnet.bybit.com/v5/private".to_string() } else { "wss://stream.bybit.com/v5/private".to_string() });
-        let rest_url = std::env::var("BYBIT_REST_URL")
-            .unwrap_or_else(|_| if is_testnet { "https://api-testnet.bybit.com".to_string() } else { "https://api.bybit.com".to_string() });
 
         let params_json = fs::read_to_string("config/strategy_params.json")
             .context("Failed to read config/strategy_params.json")?;
@@ -53,7 +50,6 @@ impl AppConfig {
             api_secret,
             public_ws_url,
             private_ws_url,
-            rest_url,
             is_testnet,
             is_shadow,
             category,

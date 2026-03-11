@@ -125,3 +125,8 @@ pub struct BybitOrderUpdateMessage {
     pub topic: String,
     pub data: Vec<BybitOrderUpdateData>,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct BybitOrderQueryList {
+    pub list: Vec<BybitOrderUpdateData>,
+}
