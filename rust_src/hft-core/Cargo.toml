@@ -1,0 +1,21 @@
+[package]
+name = "hft-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hft-domain = { path = "../hft-domain" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+simd-json = { workspace = true }
+bytes = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }

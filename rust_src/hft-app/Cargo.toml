@@ -1,0 +1,20 @@
+[package]
+name = "hft-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hft-domain = { path = "../hft-domain" }
+hft-core = { path = "../hft-core" }
+hft-service = { path = "../hft-service" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+dotenvy = { workspace = true }
+clap = { workspace = true }
+teloxide = { workspace = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

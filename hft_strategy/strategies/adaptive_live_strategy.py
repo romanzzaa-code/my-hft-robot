@@ -38,14 +38,15 @@ class AdaptiveWallStrategy:
         ctx = self.trade_manager.ctx
         state = self.trade_manager.state
         if state == StrategyState.ORDER_PLACED and ctx:
-            # Проверка пробоя стены тиком (раньше, чем придет стакан)
-            # Buy ордер: стена ниже цены. Если тик <= wall_price -> пробой.
+            # Проверка пробоя стены тиком
             is_break = False
             if ctx.side == "Buy":
-                if tick.price <= ctx.wall_price:
+                # [FIX] Теперь строго меньше, чтобы не отменять на касании
+                if tick.price < ctx.wall_price:
                     is_break = True
             else: # Sell
-                if tick.price >= ctx.wall_price:
+                # [FIX] Теперь строго больше
+                if tick.price > ctx.wall_price:
                     is_break = True
 
             if is_break:
@@ -161,8 +162,15 @@ class AdaptiveWallStrategy:
         # Цена выхода сейчас (Market)
         exit_price = best_bid if ctx.side == "Buy" else best_ask
 
-        # Пробой уровня поддержки
-        wall_broken = (exit_price < ctx.wall_price) if ctx.side == "Buy" else (exit_price > ctx.wall_price)
+        # Пробой уровня поддержки (с учетом толерантности)
+        # Если лонг: выход если Best Bid < wall_price - tolerance
+        limit_p = ctx.wall_price - (self.cfg.exit_wall_tolerance_ticks * self.cfg.tick_size)
+        if ctx.side == "Buy":
+            wall_broken = exit_price < limit_p
+        else: # Sell
+            limit_p = ctx.wall_price + (self.cfg.exit_wall_tolerance_ticks * self.cfg.tick_size)
+            wall_broken = exit_price > limit_p
+
         delta = (exit_price - ctx.entry_price) if ctx.side == "Buy" else (ctx.entry_price - exit_price)
         pnl_ticks = delta / self.cfg.tick_size
         stop_hit = pnl_ticks <= -self.cfg.stop_loss_ticks

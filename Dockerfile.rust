@@ -1,0 +1,40 @@
+# Stage 1: Build
+FROM rust:1.84-slim-bookworm as builder
+
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src/app
+
+# Copy workspace configuration
+COPY Cargo.toml Cargo.lock ./
+
+# Copy all crates
+COPY rust_src/ ./rust_src/
+
+# Build the main application in release mode
+RUN cargo build --release -p hft-app
+
+# Stage 2: Runtime
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the binary from builder stage
+COPY --from=builder /usr/src/app/target/release/hft-app /usr/local/bin/hft-app
+
+# Create config directory and ensure we have a default params file 
+# (though it will likely be overridden by docker-compose volume)
+RUN mkdir -p /app/config
+COPY config/strategy_params.json /app/config/strategy_params.json
+
+# Default command: Run in bot mode
+ENTRYPOINT ["hft-app"]
+CMD ["--bot"]

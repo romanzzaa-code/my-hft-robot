@@ -32,7 +32,7 @@ compile_commands.json
 *.exe
 
 # --- HFT Data & Logs ---
-*.log
+logs/
 *.db
 *.sqlite
 timescaledb_data/
@@ -55,3 +55,14 @@ secrets.py
 config_local.yaml
 *.key
 *.pem
+
+# --- Rust Build Artifacts ---
+target/
+Cargo.lock.bak
+
+# --- AI Context & Session State ---
+PROJECT_STATE.md
+CONTEXT_RESTORE.md
+context_optimization.md
+.tmp.driveupload/
+.kilocode/

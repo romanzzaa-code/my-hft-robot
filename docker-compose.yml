@@ -1,77 +1,34 @@
 version: '3.8'
 
 services:
-  timescaledb:
-    image: timescale/timescaledb:latest-pg14
-    container_name: hft_db
-    restart: always
-    environment:
-      - POSTGRES_PASSWORD=password
-      - POSTGRES_USER=hft_user
-      - POSTGRES_DB=hft_data
-    volumes:
-      - ./timescaledb_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hft_user -d hft_data"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # Торговый робот (Slave)
-  # --- ТВОЙ БОТ ---
+  # Основной Rust-робот
   bot:
-    build: .
-    container_name: hft_bot
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+    container_name: hft_rust_bot
     restart: unless-stopped
     volumes:
-      - ./hft_strategy:/app/hft_strategy
-      # Твой файл strategy_params.json монтируется как основной
       - ./config/strategy_params.json:/app/config/strategy_params.json
       - ./logs:/app/logs
     env_file:
       - .env
     environment:
-      - BYBIT_API_KEY=${MY_API_KEY}       # Твои ключи (добавь их в .env с префиксом)
-      - BYBIT_API_SECRET=${MY_API_SECRET}
-      - TG_NOTIFIER_TOKEN=${TG_COMMANDER_TOKEN}
-      - TG_CHAT_ID=${TG_MY_ID}
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-    network_mode: "service:timescaledb"
+      - MY_API_KEY=${MY_API_KEY}
+      - MY_API_SECRET=${MY_API_SECRET}
+      - TG_COMMANDER_TOKEN=${TG_COMMANDER_TOKEN}
+      - BYBIT_IS_SHADOW=${BYBIT_IS_SHADOW:-true}
+      - BYBIT_IS_TESTNET=${BYBIT_IS_TESTNET:-false}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  # --- БОТ ДРУГА (ИЗОЛИРОВАННЫЙ) ---
-  bot_friend:
-    build: . # Использует тот же код!
-    container_name: hft_bot_friend
-    restart: unless-stopped
-    volumes:
-      - ./hft_strategy:/app/hft_strategy
-      # Файл друга friend_params.json монтируется КАК ОСНОВНОЙ ВНУТРЬ ЕГО КОНТЕЙНЕРА
-      - ./config/friend_params.json:/app/config/strategy_params.json
-      - ./logs_friend:/app/logs
-    env_file:
-      - .env
-    environment:
-      - BYBIT_API_KEY=${FRIEND_API_KEY}     # Ключи друга
-      - BYBIT_API_SECRET=${FRIEND_API_SECRET}
-      - TG_NOTIFIER_TOKEN=${TG_COMMANDER_TOKEN}
-      - TG_CHAT_ID=${TG_FRIEND_ID}
-
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-    network_mode: "service:timescaledb"
-
-  # --- КОМАНДИР ---
-  commander:
-    build: 
-      context: ./commander
-    container_name: hft_commander
-    restart: always
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./config:/app/config # Командир видит всю папку конфигов
-    env_file:
-      - .env
-    network_mode: "service:timescaledb"
+  # Можно добавить второго бота или оставить только одного
+  # bot_friend:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.rust
+  #   container_name: hft_rust_bot_friend
+  #   ...

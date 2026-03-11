@@ -21,7 +21,13 @@ class StrategyParameters:
     entry_delta_ticks: int = 1
     
     # [UPDATED] Стоп-лосс: 1 тик за стеной
-    stop_loss_ticks: int = 1 
+    stop_loss_ticks: int = 5 
+    
+    # --- ТОЛЕРАНТНОСТЬ (TOLERANCE) ---
+    # Не отменять вход, если цена только коснулась стены
+    entry_touch_tolerance: bool = True 
+    # Выходить по панике только если цена ушла на N тиков за стену
+    exit_wall_tolerance_ticks: int = 2 
     
     # [NEW] ДИНАМИЧЕСКИЙ ТЕЙК
     use_dynamic_tp: bool = True     
