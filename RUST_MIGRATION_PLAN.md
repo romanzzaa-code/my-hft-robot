@@ -40,9 +40,10 @@
 - [x] Dockerization (Multi-stage build).
 - [x] Mock Tests for `BybitRestClient`.
 
-### Phase 5: Final Verification & Cutover
-- [ ] Shadow Trading (запуск Rust версии в режиме логов без реальных ордеров).
-- [ ] Поэтапный переход на Live Trading.
+### Phase 5: Final Verification & Cutover [COMPLETED]
+- [x] Shadow Trading (запуск Rust версии в режиме логов без реальных ордеров).
+- [x] Поэтапный переход на Live Trading.
+- [x] Полное удаление Legacy Python/C++ кода.
 
 ---
 
